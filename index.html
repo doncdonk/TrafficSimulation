@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>都市交通シミュレーション 自然道路v4</title>
+<title>都市交通シミュレーション v19 安定版</title>
 <style>
 body { margin:0; background:#1e1e1e; color:white; font-family:sans-serif;}
 #ui { padding:8px; text-align:center;}
@@ -24,51 +24,77 @@ input { width:200px; }
 <canvas id="game" width="1000" height="700"></canvas>
 
 <script>
-const canvas=document.getElementById("game");
-const ctx=canvas.getContext("2d");
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
 
-const nodes=[], edges=[], cars=[];
-let selectedNode=null, time=0, flowRate=0.5;
-const MIN_GAP=20, SLOW_GAP=60;
-const laneWidth=18;
+const nodes = [], edges = [], cars = [];
+let selectedNode = null, timeCounter = 0, flowRate = 0.5;
+const MIN_GAP = 20, SLOW_GAP = 60;
+const laneWidth = 18;
 
 // ===== 画像 =====
-const roadImg=new Image(); roadImg.src="douro.png";
-const carImgs=[];
-for(let i=1;i<=10;i++){ const img=new Image(); img.src="car"+i+".png"; carImgs.push(img); }
+const roadImg = new Image(); roadImg.src = "douro.png";
+const carImgs = []; for(let i=1;i<=10;i++){ const img=new Image(); img.src="car"+i+".png"; carImgs.push(img); }
+const houseImgs = []; for(let i=1;i<=8;i++){ const img=new Image(); img.src="house"+i+".png"; houseImgs.push(img); }
+const parkImg = new Image(); parkImg.src="park1.png";
+
+// ===== ユーティリティ =====
+function shuffleArray(array){ for(let i=array.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [array[i],array[j]]=[array[j],array[i]]; } }
+function linesIntersect(p1,p2,p3,p4){ 
+    const ccw=(a,b,c)=> (c.y-a.y)*(b.x-a.x) > (b.y-a.y)*(c.x-a.x);
+    return (ccw(p1,p3,p4)!==ccw(p2,p3,p4)) && (ccw(p1,p2,p3)!==ccw(p1,p2,p4));
+}
+
+// ===== エッジ追加 =====
+function addEdgeSafe(a,b,type="branch"){
+    for(const e of edges){
+        if(a===e.from || a===e.to || b===e.from || b===e.to) continue;
+        if(linesIntersect(a,b,e.from,e.to)) return false;
+    }
+    edges.push(new Edge(a,b,type));
+    return true;
+}
 
 // ===== Node =====
 class Node{
-  constructor(x,y,external=false){
-    this.x=x; this.y=y; this.external=external;
+  constructor(x,y,type="cross",external=false,img=null){
+    this.x=x; this.y=y; this.type=type; this.external=external;
     this.phase=0; this.timer=0; this.greenDuration=120;
+    this.img=img;
   }
   update(){
-    if(this.external) return;
+    if(this.external || this.type!=="cross") return;
     this.timer++;
     if(this.timer>=this.greenDuration){ this.phase=(this.phase+1)%2; this.timer=0; }
   }
   draw(){
-    ctx.fillStyle=this.external?"#444":"#666";
-    ctx.fillRect(this.x-15,this.y-15,30,30);
-    if(!this.external){
-      const directions=["up","down","left","right"];
-      directions.forEach(dir=>{
-        const hasRoad={
-          up: edges.some(e=>e.from===this && e.to.y<this.y),
-          down: edges.some(e=>e.from===this && e.to.y>this.y),
-          left: edges.some(e=>e.from===this && e.to.x<this.x),
-          right: edges.some(e=>e.from===this && e.to.x>this.x)
-        };
-        if(!hasRoad[dir]) return;
-        ctx.fillStyle=(this.phase===0 && (dir==="up"||dir==="down")) || (this.phase===1 && (dir==="left"||dir==="right"))?"#0f0":"#f00";
-        switch(dir){
-          case "up": ctx.fillRect(this.x-5,this.y-20,10,8); break;
-          case "down": ctx.fillRect(this.x-5,this.y+12,10,8); break;
-          case "left": ctx.fillRect(this.x-20,this.y-5,8,10); break;
-          case "right": ctx.fillRect(this.x+12,this.y-5,8,10); break;
+    switch(this.type){
+      case "cross":
+        ctx.fillStyle=this.external?"#444":"#666";
+        ctx.fillRect(this.x-15,this.y-15,30,30);
+        if(!this.external){
+          ["up","down","left","right"].forEach(dir=>{
+            const hasRoad={
+              up: edges.some(e=>e.from===this && e.to.y<this.y),
+              down: edges.some(e=>e.from===this && e.to.y>this.y),
+              left: edges.some(e=>e.from===this && e.to.x<this.x),
+              right: edges.some(e=>e.from===this && e.to.x>this.x)
+            };
+            if(!hasRoad[dir]) return;
+            ctx.fillStyle=(this.phase===0 && (dir==="up"||dir==="down")) || (this.phase===1 && (dir==="left"||dir==="right"))?"#0f0":"#f00";
+            switch(dir){
+              case "up": ctx.fillRect(this.x-5,this.y-20,10,8); break;
+              case "down": ctx.fillRect(this.x-5,this.y+12,10,8); break;
+              case "left": ctx.fillRect(this.x-20,this.y-5,8,10); break;
+              case "right": ctx.fillRect(this.x+12,this.y-5,8,10); break;
+            }
+          });
         }
-      });
+        break;
+      case "house":
+      case "park":
+        if(this.img) ctx.drawImage(this.img,this.x-20,this.y-20,40,40);
+        break;
     }
   }
 }
@@ -77,19 +103,43 @@ class Node{
 class Edge{
   constructor(from,to,type="branch"){
     this.from=from; this.to=to; this.type=type;
-    this.lanesPerDir=(type==="main"?2:1);
+    // 主要道路はforward/backward 各2車線、支線は各1車線
+    this.lanesPerDir = (type==="main")? 2 : 1;
     this.length=Math.hypot(to.x-from.x,to.y-from.y);
+    // laneCars は forward/backward 配列で管理
     this.laneCars={ forward:Array.from({length:this.lanesPerDir},()=>[]), backward:Array.from({length:this.lanesPerDir},()=>[]) };
   }
 }
 
 // ===== Car =====
+let carCounter = 0;
 class Car{
-  constructor(edge,lane,img,dir){
-    this.edge=edge; this.lane=lane; this.edgeDir=dir;
-    this.pos=0; this.speed=0; this.maxSpeed=1+Math.random()*1.2; this.wait=0; this.img=img;
-    edge.laneCars[dir][lane].push(this);
+  constructor(route,img){
+    this.idx = carCounter++;
+    this.route=route;
+    this.edgeIndex=0;
+    this.edge=this.route[0].edge;
+    this.edgeDir=this.route[0].dir;
+
+    // 🚦 動的に空きレーンから選択
+    this.lane = this.selectLane(this.edge,this.edgeDir);
+    this.pos=0.05; 
+    this.speed=0; this.maxSpeed=1+Math.random()*1.2; this.wait=0; this.img=img;
+    this.edge.laneCars[this.edgeDir][this.lane].push(this);
   }
+
+  selectLane(edge,edgeDir){
+    let laneCandidates = [...Array(edge.lanesPerDir).keys()]; // [0,1] forward/backward
+    if(edge.type==="main") laneCandidates = [...Array(edge.lanesPerDir).keys()]; // forward/backward別に2車線
+    // 空きが少ない車線を優先
+    let minCount = Infinity, chosen=laneCandidates[0];
+    for(const ln of laneCandidates){
+      const cnt = edge.laneCars[edgeDir][ln].length;
+      if(cnt<minCount){ minCount=cnt; chosen=ln; }
+    }
+    return chosen;
+  }
+
   update(){
     const laneArr=this.edge.laneCars[this.edgeDir][this.lane];
     const ahead=laneArr.filter(c=>c.pos>this.pos).sort((a,b)=>a.pos-b.pos)[0];
@@ -100,7 +150,7 @@ class Car{
       else if(dist<SLOW_GAP) targetSpeed=this.maxSpeed*(dist/SLOW_GAP);
     }
     const nextNode=this.edgeDir==="forward"?this.edge.to:this.edge.from;
-    if(!nextNode.external && this.pos>0.9){
+    if(nextNode.type==="cross" && !nextNode.external && this.pos>0.9){
       let canGo=false;
       if(this.edgeDir==="forward" && nextNode.phase===0) canGo=true;
       if(this.edgeDir==="backward" && nextNode.phase===1) canGo=true;
@@ -108,49 +158,159 @@ class Car{
     }
     this.speed+=(targetSpeed-this.speed)*0.2;
     this.pos+=this.speed/this.edge.length;
+    this.pos=Math.min(this.pos,1);
+
     if(this.pos>=1){
       laneArr.splice(laneArr.indexOf(this),1);
-      if(nextNode.external){ cars.splice(cars.indexOf(this),1); return; }
-      const connected=edges.filter(e=>e.from===nextNode||e.to===nextNode);
-      if(connected.length===0){ cars.splice(cars.indexOf(this),1); return; }
-      const nextEdge=connected[Math.floor(Math.random()*connected.length)];
-      const newDir=nextEdge.from===nextNode?"forward":"backward";
-      this.edge=nextEdge; this.edgeDir=newDir;
-      this.lane=Math.floor(Math.random()*nextEdge.lanesPerDir);
-      nextEdge.laneCars[newDir][this.lane].push(this); this.pos=0;
+      this.edgeIndex++;
+      if(this.edgeIndex>=this.route.length){
+        const currentNode = this.edgeDir==="forward"?this.edge.to:this.edge.from;
+        const newRoute = generateRouteBFS(currentNode);
+        if(newRoute && newRoute.length>0){
+          this.route = newRoute;
+          this.edgeIndex=0;
+        } else {
+          cars.splice(cars.indexOf(this),1);
+          return;
+        }
+      }
+      const nextStep=this.route[this.edgeIndex];
+      if(!nextStep || !nextStep.edge){ cars.splice(cars.indexOf(this),1); return; }
+      this.edge=nextStep.edge;
+      this.edgeDir=nextStep.dir;
+      this.lane=this.selectLane(this.edge,this.edgeDir);
+      this.pos=0.05;
+      this.edge.laneCars[this.edgeDir][this.lane].push(this);
     }
   }
+
   draw(){
     const x0=this.edge.from.x; const y0=this.edge.from.y;
     const x1=this.edge.to.x; const y1=this.edge.to.y;
     const vx=x1-x0; const vy=y1-y0;
     const pos=this.pos; const lanes=this.edge.lanesPerDir;
     const totalWidth=lanes*2*laneWidth;
-    const offset=this.edgeDir==="forward"?-totalWidth/2 + laneWidth/2 + this.lane*laneWidth
-                                        : totalWidth/2 - laneWidth/2 - this.lane*laneWidth;
+    const offset=this.edgeDir==="forward"
+        ? -totalWidth/2 + laneWidth/2 + this.lane
+        : totalWidth/2 - laneWidth/2 - (lanes-1-this.lane);
     const nx=-vy/Math.sqrt(vx*vx+vy*vy);
     const ny=vx/Math.sqrt(vx*vx+vy*vy);
     const cx=x0 + vx*pos + nx*offset;
     const cy=y0 + vy*pos + ny*offset;
-    ctx.save(); ctx.translate(cx,cy); ctx.rotate(Math.atan2(vy,vx));
-    ctx.drawImage(this.img,-10,-6,20,12);
+    const angle = Math.atan2(vy, vx) + (this.edgeDir==="backward"?Math.PI:0);
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    if(this.img) ctx.drawImage(this.img, -10, -6, 20, 12);
+    else{ ctx.fillStyle="yellow"; ctx.fillRect(-6, -4, 12, 8); }
     ctx.restore();
   }
 }
 
+// ===== 都市生成 =====
+function generateCity(){
+  nodes.length=0; edges.length=0;
+  const mainCols=5, mainRows=4, marginX=150, marginY=100;
+  const spacingX=(1000-2*marginX)/(mainCols-1);
+  const spacingY=(700-2*marginY)/(mainRows-1);
+  const mainNodes=[];
+  for(let i=0;i<mainRows;i++){ 
+    for(let j=0;j<mainCols;j++){
+      const n=new Node(marginX+j*spacingX, marginY+i*spacingY,"cross",false);
+      nodes.push(n); mainNodes.push(n);
+    }
+  }
+  for(let i=0;i<mainRows;i++){
+    for(let j=0;j<mainCols;j++){
+      const n = mainNodes[i*mainCols+j];
+      if(j<mainCols-1) addEdgeSafe(n, mainNodes[i*mainCols+(j+1)], "main");
+      if(i<mainRows-1) addEdgeSafe(n, mainNodes[(i+1)*mainCols+j], "main");
+    }
+  }
+
+  // 支線生成
+  for(const n of mainNodes){
+    if(Math.random()<0.4){
+      const angle = Math.random()*2*Math.PI;
+      const dist = 60+Math.random()*40;
+      const x = n.x + Math.cos(angle)*dist;
+      const y = n.y + Math.sin(angle)*dist;
+      const branchNode = new Node(x,y,"cross",false);
+      nodes.push(branchNode);
+      if(!addEdgeSafe(n, branchNode,"branch")) edges.push(new Edge(n, branchNode,"branch"));
+    }
+  }
+
+  // 建物生成
+  for(const edge of edges){
+    const numBuildings = 1 + Math.floor(Math.random()*2); 
+    for(let i=0;i<numBuildings;i++){
+      const t = 0.2 + Math.random()*0.6;
+      const offset = (Math.random()<0.5?1:-1) * (20 + Math.random()*10);
+      const vx=edge.to.x - edge.from.x;
+      const vy=edge.to.y - edge.from.y;
+      const length = Math.sqrt(vx*vx + vy*vy);
+      const nx = -vy/length;
+      const ny = vx/length;
+      const x = edge.from.x + vx*t + nx*offset;
+      const y = edge.from.y + vy*t + ny*offset;
+      const type = Math.random()<0.8?"house":"park";
+      const img = type==="house"? houseImgs[Math.floor(Math.random()*houseImgs.length)] : parkImg;
+      nodes.push(new Node(x,y,type,false,img));
+    }
+  }
+
+  // 外部ノード生成
+  for(let i=0;i<6;i++){
+    const x=Math.random()*1000;
+    const y=Math.random()<0.5?0:700;
+    const ext=new Node(x,y,"cross",true);
+    nodes.push(ext);
+    const mainNode=mainNodes[Math.floor(Math.random()*mainNodes.length)];
+    edges.push(new Edge(ext, mainNode,"branch"));
+  }
+}
+
+// ===== BFSルート生成 =====
+function generateRouteBFS(startNode){
+  let targets = nodes.filter(n => (n.type==="house" || n.type==="park" || n.external) && n !== startNode);
+  if(targets.length===0) targets = nodes.filter(n=>n.type==="cross" && n !== startNode);
+
+  const queue = [{node:startNode, path:[]}];
+  const visited = new Set([startNode]);
+
+  while(queue.length>0){
+    const {node,path} = queue.shift();
+    if(targets.includes(node) && path.length>0) {
+        return path;
+    }
+    const nextEdges = edges.filter(e=> e.from===node || e.to===node);
+    for(const e of nextEdges){
+      const nextNode = e.from===node ? e.to : e.from;
+      if(visited.has(nextNode)) continue;
+      visited.add(nextNode);
+      queue.push({node: nextNode, path:[...path,{edge:e, dir:e.from===node?"forward":"backward"}]});
+    }
+  }
+  return null;
+}
+
 // ===== 車生成 =====
 function spawnCar(){
-  const entryEdges=edges.filter(e=>e.from.external);
-  if(entryEdges.length===0) return;
-  const e=entryEdges[Math.floor(Math.random()*entryEdges.length)];
-  const lane=Math.floor(Math.random()*e.lanesPerDir);
-  const img=carImgs[Math.floor(Math.random()*carImgs.length)];
-  cars.push(new Car(e,lane,img,"forward"));
+  const entryNodes = nodes.filter(n=>n.external);
+  const candidates = entryNodes.filter(n=>edges.some(e=>e.from===n||e.to===n));
+  if(candidates.length===0) return;
+  const startNode = candidates[Math.floor(Math.random()*candidates.length)];
+  const route = generateRouteBFS(startNode);
+  if(!route || route.length===0) return;
+  const img = carImgs[Math.floor(Math.random()*carImgs.length)];
+  const car = new Car(route,img);
+  cars.push(car);
 }
 
 // ===== 時間更新 =====
 function updateTime(){
-  time++; const t=time%3600;
+  timeCounter++; const t=timeCounter%3600;
   let baseRate=0.02;
   if(t<800||(t>1800&&t<2600)) baseRate=0.08;
   else if(t>3000) baseRate=0.01;
@@ -165,22 +325,25 @@ function drawRoad(e){
   ctx.save(); ctx.translate(e.from.x,e.from.y); ctx.rotate(angle);
   const roadHeight=e.lanesPerDir*2*laneWidth;
   let x=0; while(x<dist){ ctx.drawImage(roadImg,x,-roadHeight/2,60,roadHeight); x+=60; }
-  // 車線・中央分離帯
-  if(e.type==="main"){
-    for(let i=1;i<4;i++){
-      if(i===2){ ctx.fillStyle="#FFD700"; ctx.fillRect(0,-3,dist,6); continue; } 
-      const offset=-roadHeight/2 + i*laneWidth;
-      ctx.strokeStyle="#FFF"; ctx.lineWidth=2;
-      ctx.beginPath(); ctx.moveTo(0,offset); ctx.lineTo(dist,offset); ctx.stroke();
-    }
-  } else {
-    const offset=laneWidth/2;
-    ctx.strokeStyle="#FFF"; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(0,-offset); ctx.lineTo(dist,-offset); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0,offset); ctx.lineTo(dist,offset); ctx.stroke();
-  }
   ctx.restore();
 }
+
+// ===== UI =====
+document.getElementById("flowSlider").oninput=function(){ flowRate=parseInt(this.value)/100; document.getElementById("flowVal").textContent=this.value; };
+document.getElementById("greenSlider").oninput=function(){ 
+  if(selectedNode){ selectedNode.greenDuration=parseInt(this.value); document.getElementById("greenVal").textContent=selectedNode.greenDuration; }
+};
+canvas.onclick=(e)=>{
+  const rect=canvas.getBoundingClientRect();
+  const mx=e.clientX-rect.left; const my=e.clientY-rect.top;
+  for(const n of nodes){ 
+    if(!n.external && n.type==="cross" && Math.abs(mx-n.x)<15 && Math.abs(my-n.y)<15){ 
+      selectedNode=n; 
+      document.getElementById("greenSlider").value=n.greenDuration; 
+      document.getElementById("greenVal").textContent=n.greenDuration; 
+    } 
+  } 
+};
 
 // ===== メインループ =====
 function loop(){
@@ -195,74 +358,18 @@ function loop(){
   requestAnimationFrame(loop);
 }
 
-// ===== 自然道路生成 =====
-function generateCity(){
-  nodes.length=0; edges.length=0;
-  const mainCols=5, mainRows=4, marginX=150, marginY=100;
-  const spacingX=(1000-2*marginX)/(mainCols-1);
-  const spacingY=(700-2*marginY)/(mainRows-1);
-  const mainNodes=[];
-  for(let i=0;i<mainRows;i++){ 
-    for(let j=0;j<mainCols;j++){
-      if(Math.random()<0.2) continue;
-      const n=new Node(marginX+j*spacingX + (Math.random()-0.5)*30, marginY+i*spacingY + (Math.random()-0.5)*30,false);
-      nodes.push(n); mainNodes.push(n);
-    }
+// ===== 画像ロード確認 =====
+const allImgs = [roadImg, parkImg, ...carImgs, ...houseImgs];
+let loadedImages = 0;
+allImgs.forEach(img => img.onload = () => {
+  loadedImages++;
+  if(loadedImages >= allImgs.length){
+    generateCity(); 
+    loop(); 
+    console.log("✅ v19 安定版 起動成功"); 
   }
-  // 主要道路接続（直線のみ）
-  mainNodes.forEach(n=>{
-    mainNodes.forEach(m=>{
-      if(n===m) return;
-      const dx=Math.abs(n.x-m.x); const dy=Math.abs(n.y-m.y);
-      if(dx<spacingX+20 && dx>spacingX-60 && dy<40) addEdgeSafe(n,m,"main");
-      if(dy<spacingY+20 && dy>spacingY-60 && dx<40) addEdgeSafe(n,m,"main");
-    });
-  });
-  // 支線生成
-  mainNodes.forEach(n=>{
-    const branchCount=Math.floor(Math.random()*2)+1;
-    for(let i=0;i<branchCount;i++){
-      const x=n.x + (Math.random()-0.5)*80;
-      const y=n.y + (Math.random()-0.5)*80;
-      const b=new Node(x,y,false);
-      const tooClose=edges.some(e=>distancePointToSegment(b,e.from,e.to)<30);
-      if(tooClose) continue;
-      if(addEdgeSafe(n,b,"branch")) nodes.push(b);
-    }
-  });
-  // 外部ノード
-  for(let i=0;i<6;i++){
-    const x=Math.random()*1000; const y=Math.random()<0.5?0:700;
-    const ext=new Node(x,y,true); nodes.push(ext);
-    const target=mainNodes[Math.floor(Math.random()*mainNodes.length)];
-    addEdgeSafe(ext,target,"branch");
-  }
-}
-
-// ===== UI =====
-document.getElementById("flowSlider").oninput=function(){ flowRate=parseInt(this.value)/100; document.getElementById("flowVal").textContent=this.value; };
-document.getElementById("greenSlider").oninput=function(){ if(selectedNode){ selectedNode.greenDuration=parseInt(this.value); document.getElementById("greenVal").textContent=this.value; }};
-canvas.onclick=(e)=>{
-  const rect=canvas.getBoundingClientRect();
-  const mx=e.clientX-rect.left; const my=e.clientY-rect.top;
-  for(const n of nodes){ if(!n.external && Math.abs(mx-n.x)<15 && Math.abs(my-n.y)<15){ selectedNode=n; document.getElementById("greenSlider").value=n.greenDuration; document.getElementById("greenVal").textContent=n.greenDuration; } } };
-
-// ===== 起動 =====
-roadImg.onload=()=>{
-  let loaded=0;
-  carImgs.forEach(img=>{
-    img.onload=()=>{
-      loaded++;
-      if(loaded===carImgs.length){ generateCity(); loop(); console.log("✅ 自然道路v4 起動"); }
-    };
-  });
-};
-
-// ===== 交差判定 =====
-function linesIntersect(p1,p2,p3,p4){ function ccw(a,b,c){ return (c.y-a.y)*(b.x-a.x) > (b.y-a.y)*(c.x-a.x); } return (ccw(p1,p3,p4)!==ccw(p2,p3,p4)) && (ccw(p1,p2,p3)!==ccw(p1,p2,p4)); }
-function sharesEndpoint(a,b,e){ return (a===e.from||a===e.to||b===e.from||b===e.to); }
-function addEdgeSafe(a,b,type="branch"){ for(const e of edges){ if(sharesEndpoint(a,b,e)) continue; if(linesIntersect(a,b,e.from,e.to)) return false; } edges.push(new Edge(a,b,type)); edges.push(new Edge(b,a,type)); return true; }
-function distancePointToSegment(p,v,w){ const l2=(v.x-w.x)**2+(v.y-w.y)**2; if(l2===0) return Math.hypot(p.x-v.x,p.y-v.y); let t=((p.x-v.x)*(w.x-v.x)+(p.y-v.y)*(w.y-v.y))/l2; t=Math.max(0,Math.min(1,t)); const proj={x:v.x+t*(w.x-v.x),y:v.y+t*(w.y-v.y)}; return Math.hypot(p.x-proj.x,p.y-proj.y); }
+});
+setTimeout(()=>{ if(loadedImages<allImgs.length){ generateCity(); loop(); console.warn("⚠️ 一部画像ロード失敗、フォールバック開始"); } }, 5000);
 </script>
 </body>
 </html>
