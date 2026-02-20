@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>都市交通シミュレーション v21</title>
+<style>
+body { margin:0; background:#1e1e1e; color:white; font-family:sans-serif; }
+#ui { padding:8px; text-align:center; }
+canvas { background:#2b2b2b; display:block; margin:auto; }
+input { width:200px; }
+</style>
+</head>
+<body>
+<div id="ui">
+  流入量: <input type="range" id="flowSlider" min="0" max="100" value="50"><span id="flowVal">50</span>
+  |
+  交差点青時間: <input type="range" id="greenSlider" min="60" max="300" value="120"><span id="greenVal">120</span>
+  |
+  時間帯: <span id="timeLabel">Day</span>
+  |
+  渋滞: <span id="jam">0</span>
+</div>
+<canvas id="game" width="1000" height="700"></canvas>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+const nodes = [], edges = [], cars = [];
+let selectedNode = null, timeCounter = 0, flowRate = 0.5;
+
+const MIN_GAP  = 20;   // 前車との最小距離(px)
+const SLOW_GAP = 60;   // 減速開始距離(px)
+const LANE_W   = 18;   // 1車線の幅(px)
+
+// ===== 画像 =====
+const roadImg   = new Image(); roadImg.src  = "douro.png";
+const parkImg   = new Image(); parkImg.src  = "park1.png";
+const carImgs   = Array.from({length:10}, (_,i)=>{ const m=new Image(); m.src=`car${i+1}.png`;   return m; });
+const houseImgs = Array.from({length:8},  (_,i)=>{ const m=new Image(); m.src=`house${i+1}.png`; return m; });
+
+// ===== ユーティリティ =====
+function linesIntersect(p1,p2,p3,p4){
+  if(p1===p3||p1===p4||p2===p3||p2===p4) return false;
+  const ccw=(a,b,c)=>(c.y-a.y)*(b.x-a.x)>(b.y-a.y)*(c.x-a.x);
+  return ccw(p1,p3,p4)!==ccw(p2,p3,p4) && ccw(p1,p2,p3)!==ccw(p1,p2,p4);
+}
+
+// ===== Node =====
+class Node {
+  constructor(x,y,type="cross",external=false,img=null){
+    this.x=x; this.y=y; this.type=type; this.external=external; this.img=img;
+    this.phase=0; this.timer=0; this.greenDuration=120;
+  }
+  update(){
+    if(this.external || this.type!=="cross") return;
+    if(++this.timer >= this.greenDuration){ this.phase=(this.phase+1)%2; this.timer=0; }
+  }
+  draw(){
+    if(this.type==="house"||this.type==="park"){
+      if(this.img) ctx.drawImage(this.img, this.x-20, this.y-20, 40, 40);
+      return;
+    }
+    ctx.fillStyle = this.external ? "#444" : "#666";
+    ctx.fillRect(this.x-15, this.y-15, 30, 30);
+    if(this.external) return;
+
+    // 信号: このノードをfromとするエッジの方向を見る
+    const outEdges = edges.filter(e=>e.from===this);
+    const dirs = {up:false,down:false,left:false,right:false};
+    for(const e of outEdges){
+      const dx=e.to.x-this.x, dy=e.to.y-this.y;
+      if(Math.abs(dy)>Math.abs(dx)){ if(dy<0) dirs.up=true; else dirs.down=true; }
+      else                          { if(dx<0) dirs.left=true; else dirs.right=true; }
+    }
+    const vG=this.phase===0, hG=this.phase===1;
+    if(dirs.up)   { ctx.fillStyle=vG?"#0f0":"#f00"; ctx.fillRect(this.x-5, this.y-22, 10,8); }
+    if(dirs.down) { ctx.fillStyle=vG?"#0f0":"#f00"; ctx.fillRect(this.x-5, this.y+14, 10,8); }
+    if(dirs.left) { ctx.fillStyle=hG?"#0f0":"#f00"; ctx.fillRect(this.x-22,this.y-5,   8,10); }
+    if(dirs.right){ ctx.fillStyle=hG?"#0f0":"#f00"; ctx.fillRect(this.x+14, this.y-5,  8,10); }
+  }
+}
+
+// ===== Edge =====
+// ★ 全エッジは from→to の一方通行。
+// main: 同方向2車線(片側2レーン)
+// branch: 同方向1車線
+// 反対方向の交通は別エッジとして独立定義する。
+class Edge {
+  constructor(from,to,type="branch"){
+    this.from=from; this.to=to; this.type=type;
+    this.lanes = (type==="main") ? 2 : 1;
+    this.length = Math.hypot(to.x-from.x, to.y-from.y);
+    this.laneCars = Array.from({length:this.lanes}, ()=>[]);
+  }
+}
+
+// ===== Car =====
+// ★ 左側通行の原則:
+//   nx = (-vy/len, vx/len) はCanvas(Y下向き)上で進行方向の右側が正。
+//   左側 = nx負方向 → offset = -(LANE_W/2 + lane * LANE_W)
+//   lane0: 中央寄り(offset = -LANE_W/2)
+//   lane1: 外側    (offset = -LANE_W/2 - LANE_W)
+let carCounter=0;
+class Car {
+  constructor(route, img){
+    this.id=carCounter++;
+    this.route=route;   // [{edge, lane}, ...]
+    this.routeIdx=0;
+    this.edge=route[0].edge;
+    this.lane=route[0].lane;
+    this.pos=0.02;
+    this.speed=0;
+    this.maxSpeed=1+Math.random()*1.2;
+    this.wait=0;
+    this.img=img;
+    this.alive=true;
+    this.edge.laneCars[this.lane].push(this);
+  }
+
+  update(){
+    if(!this.alive) return;
+    const laneArr=this.edge.laneCars[this.lane];
+
+    // 前方車との車間で速度決定
+    const ahead=laneArr.filter(c=>c.pos>this.pos).sort((a,b)=>a.pos-b.pos)[0];
+    let target=this.maxSpeed;
+    if(ahead){
+      const gap=(ahead.pos-this.pos)*this.edge.length;
+      if(gap<MIN_GAP){ target=0; this.wait++; }
+      else if(gap<SLOW_GAP) target=this.maxSpeed*(gap/SLOW_GAP);
+    }
+
+    // 信号判定: 次のノード(to)が内部交差点なら信号を確認
+    const toNode=this.edge.to;
+    if(toNode.type==="cross" && !toNode.external && this.pos>0.85){
+      const dx=this.edge.to.x-this.edge.from.x;
+      const dy=this.edge.to.y-this.edge.from.y;
+      const isVert=Math.abs(dy)>Math.abs(dx);
+      const canGo=isVert?(toNode.phase===0):(toNode.phase===1);
+      if(!canGo){ target=0; this.wait++; }
+    }
+
+    this.speed+=(target-this.speed)*0.2;
+    this.pos+=this.speed/this.edge.length;
+    this.pos=Math.min(this.pos,1);
+
+    if(this.pos>=1){
+      const idx=laneArr.indexOf(this);
+      if(idx!==-1) laneArr.splice(idx,1);
+      this.routeIdx++;
+      if(this.routeIdx>=this.route.length){ this.alive=false; return; }
+      const next=this.route[this.routeIdx];
+      this.edge=next.edge;
+      this.lane=next.lane;
+      this.pos=0.02;
+      this.edge.laneCars[this.lane].push(this);
+    }
+  }
+
+  draw(){
+    if(!this.alive) return;
+    const {from,to}=this.edge;
+    const vx=to.x-from.x, vy=to.y-from.y;
+    const len=Math.sqrt(vx*vx+vy*vy);
+    const nx=-vy/len, ny=vx/len;
+
+    // 左側通行: nx負方向(進行左側)にオフセット
+    const offset=-(LANE_W/2 + this.lane*LANE_W);
+    const cx=from.x+vx*this.pos+nx*offset;
+    const cy=from.y+vy*this.pos+ny*offset;
+    const angle=Math.atan2(vy,vx);
+
+    ctx.save();
+    ctx.translate(cx,cy);
+    ctx.rotate(angle);
+    if(this.img&&this.img.complete&&this.img.naturalWidth>0){
+      ctx.drawImage(this.img,-10,-6,20,12);
+    } else {
+      ctx.fillStyle="yellow";
+      ctx.fillRect(-6,-4,12,8);
+    }
+    ctx.restore();
+  }
+}
+
+
+// ===== 都市生成 =====
+// 設計:
+//  1. 幹線(arterial): 水平2〜3本 + 垂直2〜3本をランダムに配置
+//     → 交点を自動計算しノード化 → 多様な構造パターン
+//  2. 支線(branch): 主要道路の「途中」からT字路として枝分かれ
+//     → エッジを中間ノードで分割し、そこから垂直方向に伸ばす
+//  全エッジは一方通行ペア(A→B と B→A)。
+
+function generateCity(){
+  nodes.length=0; edges.length=0; cars.length=0;
+
+  // ================================================================
+  // ヘルパー
+  // ================================================================
+  function mkNode(x,y,type="cross",ext=false,img=null){
+    const n=new Node(x,y,type,ext,img); nodes.push(n); return n;
+  }
+
+  // 点pから線分(a,b)への距離
+  function ptSegDist(p,a,b){
+    const dx=b.x-a.x,dy=b.y-a.y,l2=dx*dx+dy*dy;
+    if(l2===0) return Math.hypot(p.x-a.x,p.y-a.y);
+    const t=Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/l2));
+    return Math.hypot(p.x-a.x-dx*t, p.y-a.y-dy*t);
+  }
+
+  // エッジ追加の厳密チェック
+  // ① 最小長  ② 重複  ③ 交差  ④ 中間部分の近接平行（端点は除外）
+  function canAdd(a,b,minLen=50){
+    if(Math.hypot(b.x-a.x,b.y-a.y)<minLen) return false;
+    if(edges.some(e=>(e.from===a&&e.to===b)||(e.from===b&&e.to===a))) return false;
+    const vx=b.x-a.x,vy=b.y-a.y,vl=Math.hypot(vx,vy);
+    for(const e of edges){
+      if(linesIntersect(a,b,e.from,e.to)) return false;
+      const ex=e.to.x-e.from.x,ey=e.to.y-e.from.y,el=Math.hypot(ex,ey);
+      if(el<1) continue;
+      if(Math.abs((vx*ex+vy*ey)/(vl*el))<0.90) continue; // 平行でない
+      // 中間点(25/50/75%)で近接チェック（端点除外で交差点誤判定を防ぐ）
+      const near=[0.25,0.5,0.75].some(t=>{
+        const px=a.x+vx*t, py=a.y+vy*t;
+        return ptSegDist({x:px,y:py},e.from,e.to)<38;
+      });
+      if(near) return false;
+    }
+    return true;
+  }
+
+  function addPair(a,b,type){
+    if(!canAdd(a,b)) return false;
+    edges.push(new Edge(a,b,type));
+    edges.push(new Edge(b,a,type));
+    return true;
+  }
+
+  // 2線分の交点を計算（平行・非交差時はnull）
+  function segIntersection(p1,p2,p3,p4){
+    const d1x=p2.x-p1.x, d1y=p2.y-p1.y;
+    const d2x=p4.x-p3.x, d2y=p4.y-p3.y;
+    const cross=d1x*d2y-d1y*d2x;
+    if(Math.abs(cross)<0.001) return null;
+    const t=((p3.x-p1.x)*d2y-(p3.y-p1.y)*d2x)/cross;
+    const u=((p3.x-p1.x)*d1y-(p3.y-p1.y)*d1x)/cross;
+    if(t<0.05||t>0.95||u<0.05||u>0.95) return null; // 端点付近は除外
+    return {x:p1.x+d1x*t, y:p1.y+d1y*t};
+  }
+
+  // ================================================================
+  // 1. 幹線(arterial) — 水平線・垂直線をランダム配置して交点ノード生成
+  // ================================================================
+
+  // 水平線: 2〜3本、y座標をランダムに選択
+  const numH=2+Math.floor(Math.random()*2);  // 2〜3本
+  const numV=2+Math.floor(Math.random()*2);  // 2〜3本
+
+  // y座標: 150〜560の範囲で均等分割＋ランダムジッター
+  function randLines(count, lo, hi){
+    const step=(hi-lo)/(count+1);
+    return Array.from({length:count},(_,i)=>
+      Math.round(lo+step*(i+1)+(Math.random()-0.5)*step*0.4)
+    );
+  }
+  const hYs=randLines(numH,130,570);  // 水平線のy座標
+  const vXs=randLines(numV,180,820);  // 垂直線のx座標
+
+  // 各水平・垂直線を「無限長の直線」として定義し、後で交点でノード化
+  // 水平線: y=hY, x: 0→1000
+  // 垂直線: x=vX, y: 0→700
+
+  // 外部ノードを幹線の端点として作成
+  const hExtL=hYs.map(y=>mkNode(0,   y,"cross",true));
+  const hExtR=hYs.map(y=>mkNode(1000,y,"cross",true));
+  const vExtT=vXs.map(x=>mkNode(x,  0,"cross",true));
+  const vExtB=vXs.map(x=>mkNode(x,700,"cross",true));
+
+  // 交点ノードマトリクス: crossPt[hi][vi] = {x,y} の交差点ノード
+  const crossPt=hYs.map((hy,hi)=>
+    vXs.map((vx,vi)=>mkNode(vx,hy,"cross"))
+  );
+
+  // 水平幹線を各行で左端→交点→…→右端とエッジで繋ぐ
+  for(let hi=0;hi<numH;hi++){
+    const row=[hExtL[hi], ...crossPt[hi], hExtR[hi]];
+    for(let i=0;i<row.length-1;i++) addPair(row[i],row[i+1],"main");
+  }
+  // 垂直幹線を各列で上端→交点→…→下端とエッジで繋ぐ
+  for(let vi=0;vi<numV;vi++){
+    const col=[vExtT[vi], ...crossPt.map(r=>r[vi]), vExtB[vi]];
+    for(let i=0;i<col.length-1;i++) addPair(col[i],col[i+1],"main");
+  }
+
+  // ================================================================
+  // 2. 支線(branch) — 2種類の生成方法
+  //
+  //  [A] 道路の途中からT字路: 主要道路エッジを中間ノードで分割し、
+  //      そこから垂直方向に支線を伸ばす
+  //  [B] 既存交差点から斜め方向に伸ばし、別の交差点へ接続
+  // ================================================================
+
+  // [A] 道路途中からT字路支線
+  // 既存mainエッジのうち十分長いものを選び、中間に分岐点を作る
+  function splitEdgeAndBranch(){
+    // 現時点のmainエッジのスナップショット（分割中にedgesが変化するため）
+    const mainEdges=edges.filter(e=>e.type==="main"&&e.length>180);
+    // ランダムに数本選んで試みる
+    const targets=[...mainEdges].sort(()=>Math.random()-0.5).slice(0,4);
+
+    for(const e of targets){
+      if(Math.random()<0.4) continue; // 60%の確率で試みる
+
+      // 中間点を25〜75%の範囲でランダム選択
+      const t=0.3+Math.random()*0.4;
+      const mx=e.from.x+(e.to.x-e.from.x)*t;
+      const my=e.from.y+(e.to.y-e.from.y)*t;
+
+      // 近すぎる既存ノードがあればスキップ
+      if(nodes.some(n=>n.type==="cross"&&Math.hypot(n.x-mx,n.y-my)<80)) continue;
+
+      // エッジの方向ベクトル
+      const vx=e.to.x-e.from.x, vy=e.to.y-e.from.y;
+      const len=Math.hypot(vx,vy);
+      // 垂直方向（左右どちらか）
+      const side=Math.random()<0.5?1:-1;
+      const nx=-vy/len*side, ny=vx/len*side;
+      const bLen=100+Math.random()*80;
+      const tx=Math.max(30,Math.min(970, mx+nx*bLen));
+      const ty=Math.max(30,Math.min(670, my+ny*bLen));
+
+      // 分岐点ノードを作成
+      const mid=mkNode(mx,my,"cross");
+
+      // 元のエッジを分割: from→mid と mid→to
+      // 元エッジを削除して2分割
+      const iFrom=edges.indexOf(e);
+      const ePair=edges.find(ep=>ep.from===e.to&&ep.to===e.from);
+      if(iFrom===-1) { nodes.splice(nodes.indexOf(mid),1); continue; }
+      edges.splice(iFrom,1);
+      if(ePair) edges.splice(edges.indexOf(ePair),1);
+
+      // 分割エッジ追加（canAdd不要: 元エッジの部分なので交差なし）
+      edges.push(new Edge(e.from,mid,"main"));
+      edges.push(new Edge(mid,e.from,"main"));
+      edges.push(new Edge(mid,e.to,"main"));
+      edges.push(new Edge(e.to,mid,"main"));
+
+      // 支線末端ノードを作成して追加
+      const term=mkNode(tx,ty,"cross");
+      if(canAdd(mid,term,60)){
+        edges.push(new Edge(mid,term,"branch"));
+        edges.push(new Edge(term,mid,"branch"));
+        // 末端からさらに近隣交差点へ接続できれば通り抜けに
+        const allC=nodes.filter(n=>n.type==="cross"&&!n.external&&n!==mid&&n!==term);
+        const nb=allC
+          .filter(m=>Math.hypot(m.x-tx,m.y-ty)<200)
+          .sort((a,b)=>Math.hypot(a.x-tx,a.y-ty)-Math.hypot(b.x-tx,b.y-ty))[0];
+        if(nb&&canAdd(term,nb,50)) addPair(term,nb,"branch");
+      } else {
+        nodes.splice(nodes.indexOf(term),1);
+      }
+    }
+  }
+  splitEdgeAndBranch();
+
+  // [B] 既存交差点から支線を伸ばす
+  const allCross=nodes.filter(n=>n.type==="cross"&&!n.external);
+
+  function existingAngles(node){
+    return edges.filter(e=>e.from===node)
+      .map(e=>Math.atan2(e.to.y-node.y,e.to.x-node.x));
+  }
+  function angleFarEnough(angle,existing){
+    return existing.every(a=>{
+      let d=Math.abs(angle-a)%(2*Math.PI);
+      if(d>Math.PI) d=2*Math.PI-d;
+      return d>Math.PI/12; // 15度以上離れていれば可
+    });
+  }
+
+  for(const n of allCross){
+    if(edges.some(e=>e.from===n&&e.type==="branch")) continue;
+    if(Math.random()<0.5) continue; // 50%で試みる
+    const exAngles=existingAngles(n);
+    const bLen=100+Math.random()*100;
+    const angles=Array.from({length:16},(_,i)=>i*(Math.PI/8)).sort(()=>Math.random()-0.5);
+
+    for(const angle of angles){
+      if(!angleFarEnough(angle,exAngles)) continue;
+      const tx=Math.max(30,Math.min(970, n.x+Math.cos(angle)*bLen));
+      const ty=Math.max(30,Math.min(670, n.y+Math.sin(angle)*bLen));
+
+      // 近くに既存交差点があればそこへ接続（通り抜け）
+      const snap=allCross.find(m=>m!==n&&Math.hypot(m.x-tx,m.y-ty)<80);
+      if(snap){ if(addPair(n,snap,"branch")) break; continue; }
+
+      const term=mkNode(tx,ty,"cross");
+      if(canAdd(n,term,80)){
+        edges.push(new Edge(n,term,"branch"));
+        edges.push(new Edge(term,n,"branch"));
+        // 末端からも別交差点へ繋げるか試みる
+        const nb=allCross
+          .filter(m=>m!==n&&Math.hypot(m.x-tx,m.y-ty)<200)
+          .sort((a,b)=>Math.hypot(a.x-tx,a.y-ty)-Math.hypot(b.x-tx,b.y-ty))[0];
+        if(nb&&canAdd(term,nb,50)) addPair(term,nb,"branch");
+        break;
+      } else {
+        nodes.splice(nodes.indexOf(term),1);
+      }
+    }
+  }
+
+  // ================================================================
+  // 3. 建物・公園（装飾）
+  // ================================================================
+  const drawnPairs=new Set();
+  for(const e of edges){
+    const key=[e.from,e.to].map(n=>`${Math.round(n.x)},${Math.round(n.y)}`).sort().join("|");
+    if(drawnPairs.has(key)) continue;
+    drawnPairs.add(key);
+    if(Math.random()>0.4) continue;
+    const t=0.2+Math.random()*0.6;
+    const roadW=e.lanes*LANE_W;
+    const side=(Math.random()<0.5?1:-1)*(roadW+14+Math.random()*10);
+    const vx=e.to.x-e.from.x,vy=e.to.y-e.from.y;
+    const len=Math.sqrt(vx*vx+vy*vy);
+    const bx=e.from.x+vx*t+(-vy/len)*side;
+    const by=e.from.y+vy*t+(vx/len)*side;
+    if(bx<10||bx>990||by<10||by>690) continue;
+    const type=Math.random()<0.8?"house":"park";
+    const img=type==="house"
+      ?houseImgs[Math.floor(Math.random()*houseImgs.length)]
+      :parkImg;
+    nodes.push(new Node(bx,by,type,false,img));
+  }
+
+  // ================================================================
+  // 4. 外部ノード孤立チェック
+  // ================================================================
+  const extNodes=nodes.filter(n=>n.external);
+  const intNodes=nodes.filter(n=>n.type==="cross"&&!n.external);
+  for(const ext of extNodes){
+    const hasOut=edges.some(e=>e.from===ext);
+    const hasIn =edges.some(e=>e.to===ext);
+    if(!hasOut||!hasIn){
+      const nearest=intNodes.slice()
+        .sort((a,b)=>Math.hypot(a.x-ext.x,a.y-ext.y)-Math.hypot(b.x-ext.x,b.y-ext.y))[0];
+      if(nearest){
+        if(!hasOut) edges.push(new Edge(ext,nearest,"branch"));
+        if(!hasIn)  edges.push(new Edge(nearest,ext,"branch"));
+      }
+    }
+  }
+}
+
+// ===== BFSルート生成 =====
+// 全エッジが一方通行なので e.from===currentNode のエッジのみ辿る。
+// ターゲット: 出発外部ノード以外の外部ノード
+function generateRouteBFS(startNode){
+  const targets = nodes.filter(n => n.external && n !== startNode);
+  const queue = [{ node: startNode, path: [] }];
+  const visited = new Set([startNode]);
+
+  while (queue.length > 0) {
+    const { node, path } = queue.shift();
+    
+    // 外部ノードに到達した場合、その経路を返す
+    if (targets.includes(node) && path.length > 0) {
+      return path;
+    }
+
+    for (const e of edges) {
+      // branchエッジを含めて全てのエッジを通過可能にする
+      if (e.from !== node || visited.has(e.to)) continue;
+      visited.add(e.to);
+      const lane = selectLane(e);
+      queue.push({ node: e.to, path: [...path, { edge: e, lane }] });
+    }
+  }
+  return null;
+}
+
+// ===== 車線選択 =====
+function selectLane(edge){
+  let min = Infinity, chosen = 0;
+  // 車線が1車線の場合は常にその車線を選ぶ
+  for (let i = 0; i < edge.lanes; i++) {
+    if (edge.laneCars[i].length < min) {
+      min = edge.laneCars[i].length;
+      chosen = i;
+    }
+  }
+  return chosen;
+}
+// ===== 車生成 =====
+function spawnCar(){
+  const extNodes=nodes.filter(n=>n.external);
+  if(extNodes.length===0) return;
+  const start=extNodes[Math.floor(Math.random()*extNodes.length)];
+  const route=generateRouteBFS(start);
+  if(!route||route.length===0) return;
+  cars.push(new Car(route, carImgs[Math.floor(Math.random()*carImgs.length)]));
+}
+
+// ===== 時間更新 =====
+function updateTime(){
+  timeCounter++;
+  const t=timeCounter%3600;
+  let rate=0.02;
+  if(t<800||(t>1800&&t<2600)) rate=0.08;
+  else if(t>3000) rate=0.01;
+  if(Math.random()<rate*flowRate*2) spawnCar();
+  document.getElementById("timeLabel").textContent=
+    (t<800||(t>1800&&t<2600))?"Rush":(t>3000?"Night":"Day");
+}
+
+// ===== 道路描画 =====
+// 各エッジは一方通行。車は進行左側(nx負方向)を走る。
+// 道路をローカル座標で y=0~-roadW の範囲に描く(負y側=左側)。
+function drawRoad(e){
+  const dx=e.to.x-e.from.x, dy=e.to.y-e.from.y;
+  const dist=Math.sqrt(dx*dx+dy*dy);
+  const angle=Math.atan2(dy,dx);
+  const roadW=e.lanes*LANE_W;
+
+  ctx.save();
+  ctx.translate(e.from.x, e.from.y);
+  ctx.rotate(angle);
+
+  // 道路面(進行左側 = ローカルy負方向)
+  ctx.fillStyle="#555";
+  ctx.fillRect(0,-roadW,dist,roadW);
+
+  if(roadImg.complete&&roadImg.naturalWidth>0){
+    let x=0; while(x<dist){ ctx.drawImage(roadImg,x,-roadW,60,roadW); x+=60; }
+  }
+
+  // 車線白線
+  ctx.strokeStyle="rgba(255,255,255,0.6)";
+  ctx.setLineDash([10,8]);
+  ctx.lineWidth=1.5;
+  for(let ln=1;ln<e.lanes;ln++){
+    ctx.beginPath(); ctx.moveTo(0,-ln*LANE_W); ctx.lineTo(dist,-ln*LANE_W); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// ===== UI =====
+document.getElementById("flowSlider").oninput=function(){
+  flowRate=parseInt(this.value)/100;
+  document.getElementById("flowVal").textContent=this.value;
+};
+document.getElementById("greenSlider").oninput=function(){
+  if(selectedNode){
+    selectedNode.greenDuration=parseInt(this.value);
+    document.getElementById("greenVal").textContent=selectedNode.greenDuration;
+  }
+};
+canvas.onclick=ev=>{
+  const r=canvas.getBoundingClientRect();
+  const mx=ev.clientX-r.left, my=ev.clientY-r.top;
+  for(const n of nodes){
+    if(!n.external&&n.type==="cross"&&Math.abs(mx-n.x)<15&&Math.abs(my-n.y)<15){
+      selectedNode=n;
+      document.getElementById("greenSlider").value=n.greenDuration;
+      document.getElementById("greenVal").textContent=n.greenDuration;
+    }
+  }
+};
+
+// ===== メインループ =====
+function loop(){
+  ctx.clearRect(0,0,1000,700);
+  updateTime();
+  nodes.forEach(n=>n.update());
+  edges.forEach(e=>drawRoad(e));
+  for(const c of cars) c.update();
+  for(let i=cars.length-1;i>=0;i--) if(!cars[i].alive) cars.splice(i,1);
+  let jam=0;
+  for(const c of cars){ c.draw(); if(c.wait>60) jam++; }
+  nodes.forEach(n=>n.draw());
+  document.getElementById("jam").textContent=jam;
+  requestAnimationFrame(loop);
+}
+
+// ===== 画像ロード =====
+function waitForImages(imgs,cb){
+  let rem=imgs.length; if(rem===0){cb();return;}
+  let done=false;
+  const tick=()=>{ if(--rem<=0&&!done){done=true;cb();} };
+  for(const img of imgs){ if(img.complete) tick(); else{ img.onload=tick; img.onerror=tick; } }
+}
+const allImgs=[roadImg,parkImg,...carImgs,...houseImgs];
+waitForImages(allImgs,()=>{ generateCity(); loop(); console.log("✅ v21 起動"); });
+setTimeout(()=>{ if(!timeCounter){ generateCity(); loop(); console.warn("⚠️ フォールバック"); } },5000);
+</script>
+</body>
+</html>
