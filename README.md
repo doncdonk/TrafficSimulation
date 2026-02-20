@@ -1,4 +1,5 @@
 # 都市交通シミュレーション
+<img width="1053" height="818" alt="image" src="https://github.com/user-attachments/assets/70d6c1f4-029b-4089-baea-3b5ba358ae57" />
 
 ブラウザ上で動作する2D都市交通シミュレーションゲーム。  
 リロードのたびに異なる道路レイアウトが自動生成され、車両がリアルタイムで走行する。
