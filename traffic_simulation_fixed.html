@@ -56,7 +56,8 @@ let selectedNode = null, timeCounter = 0, flowRate = 0.5;
 let score = 0;
 let scoreBonus = 1.0;     // 渋滞ゼロ継続でボーナス倍率UP
 let bonusStreak = 0;      // 渋滞ゼロ継続フレーム数
-const accidents = [];     // 事故リスト [{x,y,edge,timer,maxTimer,blink}]
+const accidents = [];     // 事故リスト [{x,y,edge,timer,maxTimer,blink,police}]
+const policeCars = [];    // パトカーリスト [{car,accidentRef}]
 let accidentCount = 0;    // 累計事故件数
 const ACCIDENT_DURATION = 1800; // 事故継続時間（フレーム、約30秒@60fps）
 const ACCIDENT_SLOWZONE = 80;   // 事故影響範囲（px）
@@ -71,16 +72,44 @@ const onewayImg    = new Image(); onewayImg.src    = "douro_small.png";
 const parkImg      = new Image(); parkImg.src      = "park1.png";
 const parkingImg   = new Image(); parkingImg.src   = "parking.png";
 const riverImg     = new Image(); riverImg.src     = "river.png";
+const groundImgs   = [1,2,3].map(i=>{ const m=new Image(); m.src=`ground_${i}.png`; return m; });  // ground_1=草地, ground_2=砂地, ground_3=土
 const sigGreenImg  = new Image(); sigGreenImg.src  = "shingou_blue.png";
 const sigRedImg    = new Image(); sigRedImg.src    = "shingou_red.png";
 const carImgs   = Array.from({length:10}, (_,i)=>{ const m=new Image(); m.src=`car${i+1}.png`;   return m; });
-const houseImgs = Array.from({length:8},  (_,i)=>{ const m=new Image(); m.src=`house${i+1}.png`; return m; });
+const houseImgs   = Array.from({length:8},  (_,i)=>{ const m=new Image(); m.src=`house${i+1}.png`;   return m; });
+const companyImgs = Array.from({length:4},  (_,i)=>{ const m=new Image(); m.src=`company${i+1}.png`; return m; });
+const policeImg   = new Image(); policeImg.src = "car_police.png";
 
 // ===== ユーティリティ =====
 function linesIntersect(p1,p2,p3,p4){
   if(p1===p3||p1===p4||p2===p3||p2===p4) return false;
   const ccw=(a,b,c)=>(c.y-a.y)*(b.x-a.x)>(b.y-a.y)*(c.x-a.x);
   return ccw(p1,p3,p4)!==ccw(p2,p3,p4) && ccw(p1,p2,p3)!==ccw(p1,p2,p4);
+}
+
+// より厳密な交差判定（パラメータ計算で端点上通過も検出）
+// 共有ノード(同一オブジェクト)はOK、それ以外の交差は全てNG
+// eps: 端点付近を交差とみなす閾値（0.02 = 線分の2%以内）
+function segmentsCross(p1,p2,p3,p4, eps=0.03){
+  // 共有端点は交差扱いしない
+  if(p1===p3||p1===p4||p2===p3||p2===p4) return false;
+  const d1x=p2.x-p1.x, d1y=p2.y-p1.y;
+  const d2x=p4.x-p3.x, d2y=p4.y-p3.y;
+  const denom=d1x*d2y - d1y*d2x;
+  if(Math.abs(denom)<1e-10) return false; // 平行
+  const t=((p3.x-p1.x)*d2y-(p3.y-p1.y)*d2x)/denom;
+  const u=((p3.x-p1.x)*d1y-(p3.y-p1.y)*d1x)/denom;
+  // 両方の線分の内側で交差していれば真
+  return t>eps && t<1-eps && u>eps && u<1-eps;
+}
+
+// 既存エッジ群との交差チェック（候補線分a→bが既存エッジと交差するか）
+// 共有ノード接続は許容する
+function crossesAnyEdge(a, b){
+  for(const e of edges){
+    if(segmentsCross(a,b,e.from,e.to)) return true;
+  }
+  return false;
 }
 
 // ===== Node =====
@@ -94,7 +123,7 @@ class Node {
     if(++this.timer >= this.greenDuration){ this.phase=(this.phase+1)%2; this.timer=0; }
   }
   draw(){
-    if(this.type==="house"||this.type==="park"){
+    if(this.type==="house"||this.type==="park"||this.type==="company"){
       if(this.img) ctx.drawImage(this.img, this.x-20, this.y-20, 40, 40);
       return;
     }
@@ -136,7 +165,7 @@ class Node {
     // cx,cy: 描画中心座標, angle: 回転角(rad), isGreen: 青か赤か
     function drawSignal(cx, cy, angle, isGreen){
       const img = isGreen ? sigGreenImg : sigRedImg;
-      const W = 40, H = 15; // 描画サイズ (400x150 の 1/10)
+      const W = 28, H = 10; // 描画サイズ (縮小: 400x150 の 1/15相当)
       if(sigReady){
         ctx.save();
         ctx.translate(cx, cy);
@@ -162,7 +191,7 @@ class Node {
     // left (左走行)の信号: 道路下側に立ち、左を向く → 画像を+90度回転
     // down (下走行)の信号: 道路左側に立ち、下を向く → 画像を0度(横そのまま)
     // up  (上走行)の信号: 道路右側に立ち、上を向く → 画像を180度回転
-    const SIG_DIST = 26; // 交差点中心からの距離(px)
+    const SIG_DIST = 20; // 交差点中心からの距離(px)
     if(dirs.up)    drawSignal(this.x,             this.y - SIG_DIST,  Math.PI,      vG);
     if(dirs.down)  drawSignal(this.x,             this.y + SIG_DIST,  0,            vG);
     if(dirs.left)  drawSignal(this.x - SIG_DIST,  this.y,             Math.PI/2,    hG);
@@ -252,6 +281,19 @@ class Car {
       if(idx!==-1) laneArr.splice(idx,1);
       this.routeIdx++;
       if(this.routeIdx>=this.route.length){
+        if(this.isPolice){
+          // パトカーは現場到着後、事故が解消されるまで待機
+          if(this.targetAcc && accidents.includes(this.targetAcc)){
+            // 事故現場付近に留まる（pos=0.5で停止）
+            this.targetAcc.policeArrived = true;
+            this.speed = 0;
+            this.pos = 0.5;
+            return; // alive のまま
+          }
+          // 事故解消 → パトカー消滅
+          this.alive = false;
+          return;
+        }
         this.alive=false;
         // 目的地到着でスコア加算
         score += Math.round(100 * scoreBonus);
@@ -284,8 +326,16 @@ class Car {
     if(this.img&&this.img.complete&&this.img.naturalWidth>0){
       ctx.drawImage(this.img,-10,-6,20,12);
     } else {
-      ctx.fillStyle="yellow";
+      ctx.fillStyle = this.isPolice ? "#1a3a8f" : "yellow";
       ctx.fillRect(-6,-4,12,8);
+    }
+    // パトカーのサイレン点滅（赤/青交互）
+    if(this.isPolice){
+      const siren = Math.floor(timeCounter/8)%2===0;
+      ctx.fillStyle = siren ? "rgba(255,30,30,0.85)" : "rgba(30,80,255,0.85)";
+      ctx.beginPath();
+      ctx.arc(0, -7, 3, 0, Math.PI*2);
+      ctx.fill();
     }
     ctx.restore();
   }
@@ -302,7 +352,7 @@ class Car {
 
 function generateCity(){
   nodes.length=0; edges.length=0; cars.length=0;
-  accidents.length=0; score=0; scoreBonus=1.0; bonusStreak=0; accidentCount=0;
+  accidents.length=0; policeCars.length=0; score=0; scoreBonus=1.0; bonusStreak=0; accidentCount=0;
 
   // ================================================================
   // ヘルパー
@@ -320,17 +370,31 @@ function generateCity(){
   }
 
   // エッジ追加の厳密チェック
-  // ① 最小長  ② 重複  ③ 交差  ④ 中間部分の近接平行（端点は除外）
+  // ① 最小長  ② 重複  ③ 交差（segmentsCross）  ④ T字接触防止  ⑤ 近接平行
   function canAdd(a,b,minLen=50){
     if(Math.hypot(b.x-a.x,b.y-a.y)<minLen) return false;
+    // ② 重複チェック
     if(edges.some(e=>(e.from===a&&e.to===b)||(e.from===b&&e.to===a))) return false;
     const vx=b.x-a.x,vy=b.y-a.y,vl=Math.hypot(vx,vy);
     for(const e of edges){
-      if(linesIntersect(a,b,e.from,e.to)) return false;
+      // ③ 厳密な交差チェック（X字・T字の中間交差を全て検出）
+      if(segmentsCross(a,b,e.from,e.to)) return false;
+
+      // ④ T字接触防止:
+      //    新エッジの端点 a,b が既存エッジ e の「中間部分」に近い場合はNG
+      //    （端点=ノードが道路の途中に刺さるのを防ぐ）
+      //    ただし a,b が e.from または e.to そのものである場合はOK（接続点）
+      if(a!==e.from && a!==e.to){
+        if(ptSegDist(a,e.from,e.to) < 12) return false;
+      }
+      if(b!==e.from && b!==e.to){
+        if(ptSegDist(b,e.from,e.to) < 12) return false;
+      }
+
+      // ⑤ 近接平行チェック（重複道路防止）
       const ex=e.to.x-e.from.x,ey=e.to.y-e.from.y,el=Math.hypot(ex,ey);
       if(el<1) continue;
-      if(Math.abs((vx*ex+vy*ey)/(vl*el))<0.90) continue; // 平行でない
-      // 中間点(25/50/75%)で近接チェック（端点除外で交差点誤判定を防ぐ）
+      if(Math.abs((vx*ex+vy*ey)/(vl*el))<0.90) continue;
       const near=[0.25,0.5,0.75].some(t=>{
         const px=a.x+vx*t, py=a.y+vy*t;
         return ptSegDist({x:px,y:py},e.from,e.to)<38;
@@ -578,14 +642,25 @@ function generateCity(){
   //      重複チェックのみ行い、交差・近接平行チェックは省略する。
   //      ただし同一方向に既にエッジがある場合（並走）はスキップ。
   {
-    // 外部ノード専用チェック（交差・近接平行チェックなし）
+    // 外部ノード専用チェック
+    // 外部→内部の線分は幹線を「通過」するため通常のlinesIntersectでは全て弾かれる。
+    // ただし幹線の端点(外部ノード)と共有接続する交差はOKとし、
+    // それ以外の「真の交差」（支線や他の幹線との中間クロス）は弾く。
     function canAddExt(a, b, minLen=50){
       if(Math.hypot(b.x-a.x,b.y-a.y) < minLen) return false;
-      // 重複チェック: 同一ペア間に既にエッジがあればNG
       if(edges.some(e=>(e.from===a&&e.to===b)||(e.from===b&&e.to===a))) return false;
-      // 近接平行チェックのみ（同じ位置の並走道路は防ぐ）
       const vx=b.x-a.x, vy=b.y-a.y, vl=Math.hypot(vx,vy);
       for(const e of edges){
+        // 外部ノードを共有している幹線との交差はOK（端点接続のため）
+        // ただし支線・onewayとの交差はNG
+        const shareNode = (a===e.from||a===e.to||b===e.from||b===e.to);
+        if(!shareNode){
+          // 真の交差チェック（segmentsCross使用）
+          if(segmentsCross(a,b,e.from,e.to)) return false;
+          // T字接触防止: bが既存エッジの中間に刺さるのを防ぐ
+          if(b!==e.from && b!==e.to && ptSegDist(b,e.from,e.to)<12) return false;
+        }
+        // 近接平行チェック（並走防止）
         const ex=e.to.x-e.from.x, ey=e.to.y-e.from.y, el=Math.hypot(ex,ey);
         if(el<1) continue;
         if(Math.abs((vx*ex+vy*ey)/(vl*el)) < 0.90) continue;
@@ -662,10 +737,11 @@ function generateCity(){
     const bx=e.from.x+vx*t+(-vy/len)*side;
     const by=e.from.y+vy*t+(vx/len)*side;
     if(bx<10||bx>990||by<10||by>690) continue;
-    const type=Math.random()<0.8?"house":"park";
-    const img=type==="house"
-      ?houseImgs[Math.floor(Math.random()*houseImgs.length)]
-      :parkImg;
+    const roll=Math.random();
+    let type, img;
+    if(roll<0.60){       type="house";   img=houseImgs[Math.floor(Math.random()*houseImgs.length)]; }
+    else if(roll<0.85){  type="company"; img=companyImgs[Math.floor(Math.random()*companyImgs.length)]; }
+    else {               type="park";    img=parkImg; }
     nodes.push(new Node(bx,by,type,false,img));
   }
 
@@ -748,13 +824,74 @@ function generateCity(){
     const hasOut=edges.some(e=>e.from===ext);
     const hasIn =edges.some(e=>e.to===ext);
     if(!hasOut||!hasIn){
-      const nearest=intNodes.slice()
-        .sort((a,b)=>Math.hypot(a.x-ext.x,a.y-ext.y)-Math.hypot(b.x-ext.x,b.y-ext.y))[0];
-      if(nearest){
-        if(!hasOut) edges.push(new Edge(ext,nearest,"branch"));
-        if(!hasIn)  edges.push(new Edge(nearest,ext,"branch"));
+      // 距離順に候補を試し、交差しない最初のノードへ接続
+      const sorted=intNodes.slice()
+        .sort((a,b)=>Math.hypot(a.x-ext.x,a.y-ext.y)-Math.hypot(b.x-ext.x,b.y-ext.y));
+      for(const nearest of sorted){
+        // crossesAnyEdge で交差チェック（外部ノード接続は交差許容のため canAddExt 相当）
+        const share=(a,b)=>edges.some(e=>(e.from===a&&e.to===b)||(e.from===b&&e.to===a));
+        if(!hasOut && !share(ext,nearest)){
+          // 共有端点以外との交差がなければ追加
+          let ok=true;
+          for(const e of edges){
+            if(e.from===ext||e.to===ext||e.from===nearest||e.to===nearest) continue;
+            if(segmentsCross(ext,nearest,e.from,e.to)){ok=false;break;}
+          }
+          if(ok) edges.push(new Edge(ext,nearest,"branch"));
+        }
+        if(!hasIn && !share(nearest,ext)){
+          let ok=true;
+          for(const e of edges){
+            if(e.from===ext||e.to===ext||e.from===nearest||e.to===nearest) continue;
+            if(segmentsCross(nearest,ext,e.from,e.to)){ok=false;break;}
+          }
+          if(ok) edges.push(new Edge(nearest,ext,"branch"));
+        }
+        if(edges.some(e=>e.from===ext) && edges.some(e=>e.to===ext)) break;
       }
     }
+  }
+
+  // ================================================================
+  // 4b. 生成後クロス検証 — 安全網
+  // ----------------------------------------------------------------
+  // 全エッジペアを走査して交差しているエッジを検出・削除する。
+  // どのパス（splitEdge / [B] / [D] / 孤立補完）で追加されたエッジでも
+  // 交差が残っていれば除去される。
+  // 幹線同士の「設計上の交差点」は共有ノードで接続されているため除外される。
+  {
+    let removed;
+    let pass = 0;
+    do {
+      removed = 0;
+      pass++;
+      // 削除候補を収集（削除中に配列を変えないようスナップショット）
+      const snap = [...edges];
+      const toDelete = new Set();
+      for(let i = 0; i < snap.length; i++){
+        if(toDelete.has(snap[i])) continue;
+        for(let j = i+1; j < snap.length; j++){
+          if(toDelete.has(snap[j])) continue;
+          const e1 = snap[i], e2 = snap[j];
+          if(!segmentsCross(e1.from,e1.to,e2.from,e2.to)) continue;
+          // 交差しているペアを発見 → branch/oneway 側を削除（幹線は残す）
+          // 両方 main の場合は後から追加された方（インデックスが大きい方）を削除
+          if(e1.type==="main" && e2.type==="main"){
+            toDelete.add(snap[j]); // j側を削除
+          } else if(e2.type==="main"){
+            toDelete.add(e1); // main でない e1 を削除
+          } else {
+            toDelete.add(e2); // main でない e2 を削除（または両方 branch→ j側）
+          }
+        }
+      }
+      // 削除
+      for(const e of toDelete){
+        const idx = edges.indexOf(e);
+        if(idx !== -1){ edges.splice(idx,1); removed++; }
+      }
+    } while(removed > 0 && pass < 10); // 最大10パスまで繰り返す
+    if(pass > 1) console.log(`[CrossFix] ${pass}パスで交差エッジを除去`);
   }
 
   // ================================================================
@@ -809,102 +946,124 @@ function generateCity(){
   }
 
   // ================================================================
-  // 6. 地形テクスチャ生成（sin合成ノイズ）
+  // 6. 地形テクスチャ生成（sin合成ノイズ + タイル画像）
   // ================================================================
-  // 道路・川・建物の下に敷く「空き地」の地形を事前生成する。
-  // sin波を複数重ね合わせてパーリンノイズ的な自然な色むらを作る。
-  // オフスクリーンCanvasに書き込み、毎フレームは drawImage 1回で描画。
+  // sin合成ノイズでセルごとに地形タイプを決定し、
+  // ground_1(草地) / ground_2(砂地) / ground_3(土) の128×128pxタイルを貼る。
+  // 画像未ロード時は従来の色塗りにフォールバック。
+  // オフスクリーンCanvasに一括描画し、毎フレームは drawImage 1回のみ。
   {
     const W = 1000, H = 700;
+    const TILE = 128; // タイル1枚のサイズ
     terrainCanvas = document.createElement("canvas");
     terrainCanvas.width  = W;
     terrainCanvas.height = H;
     const tCtx = terrainCanvas.getContext("2d");
-    const imageData = tCtx.createImageData(W, H);
-    const data = imageData.data;
 
-    // ランダムシード値（マップごとに異なる地形）
+    // ランダムシード値（リロードごとに異なる地形）
     const sx = Math.random() * 500;
     const sy = Math.random() * 500;
 
-    // sin合成ノイズ: 複数周波数・位相のsin波を重ねて自然なムラを作る
-    function noise(x, y){
+    // sin合成ノイズ（5オクターブ）→ 0〜1
+    function noiseVal(x, y){
       const x0 = x + sx, y0 = y + sy;
       let v = 0;
-      // オクターブ1: 大きなうねり（地形の大区画）
       v += Math.sin(x0 * 0.008 + y0 * 0.005) * 0.40;
-      // オクターブ2: 中程度のムラ（区画内のテクスチャ）
       v += Math.sin(x0 * 0.022 + y0 * 0.019 + 1.3) * 0.25;
-      // オクターブ3: 細かいムラ（草の生え具合）
       v += Math.sin(x0 * 0.055 + y0 * 0.048 + 2.7) * 0.15;
-      // オクターブ4: 斜め方向の変化（自然さを増す）
       v += Math.sin((x0 + y0) * 0.015 + 0.8) * 0.12;
-      // オクターブ5: 高周波ノイズ（ざらつき感）
-      v += Math.sin(x0 * 0.11 + y0 * 0.09 + 4.1) * 0.08;
-      // -1〜+1 → 0〜1 に正規化
-      return (v + 1) * 0.5;
+      v += Math.sin(x0 * 0.11  + y0 * 0.09  + 4.1) * 0.08;
+      return (v + 1) * 0.5; // 0〜1
     }
 
-    // 地形タイプを決定（ノイズ値から色バリエーションを選ぶ）
-    // t=0.0〜1.0 → 乾燥した土 〜 豊かな草地
-    function terrainColor(t){
-      // 複数の地形タイプを閾値で分類
-      if(t < 0.20){
-        // 乾いた土・砂利（暗い茶）
-        const f = t / 0.20;
-        return [
-          Math.round(90  + f * 30),  // R
-          Math.round(72  + f * 20),  // G
-          Math.round(55  + f * 15),  // B
-        ];
-      } else if(t < 0.40){
-        // 荒地・砂地（黄褐色）
-        const f = (t - 0.20) / 0.20;
-        return [
-          Math.round(120 + f * 25),
-          Math.round(92  + f * 28),
-          Math.round(60  + f * 10),
-        ];
-      } else if(t < 0.60){
-        // 薄い草地（くすんだ緑）
-        const f = (t - 0.40) / 0.20;
-        return [
-          Math.round(80  + f * (-10)),
-          Math.round(100 + f * 20),
-          Math.round(55  + f * 10),
-        ];
-      } else if(t < 0.80){
-        // 草地（緑）
-        const f = (t - 0.60) / 0.20;
-        return [
-          Math.round(70  + f * (-10)),
-          Math.round(120 + f * 20),
-          Math.round(65  + f * 5),
-        ];
-      } else {
-        // 濃い草地（深緑）
-        const f = (t - 0.80) / 0.20;
-        return [
-          Math.round(60  + f * (-5)),
-          Math.round(140 + f * 10),
-          Math.round(70  + f * 5),
-        ];
+    // ノイズ値 → 地形タイプインデックス
+    // 0: 草地(ground_1)  1: 砂地(ground_2)  2: 土(ground_3)
+    // 自然な地形らしく: 草地が多め、砂地・土が点在
+    function tileIndex(t){
+      if(t < 0.30) return 2; // 土     (0〜0.30)
+      if(t < 0.55) return 1; // 砂地   (0.30〜0.55)
+      return 0;              // 草地   (0.55〜1.0)
+    }
+
+    // フォールバック用カラー（地形タイプ別）
+    const fallbackColors = [
+      [75, 120, 65],   // 草地: 緑
+      [145, 120, 75],  // 砂地: 黄褐色
+      [110, 85, 60],   // 土: 茶色
+    ];
+
+    // 画像が全て読み込まれているか確認
+    const tilesReady = groundImgs.every(img => img.complete && img.naturalWidth > 0);
+
+    if(tilesReady){
+      // ===== タイル画像モード =====
+      // セルごとにノイズ値を計算してタイルを選択し貼り付ける
+      // セル中心座標でノイズをサンプリング（タイル境界のムラを防ぐ）
+      for(let cy = 0; cy < H; cy += TILE){
+        for(let cx = 0; cx < W; cx += TILE){
+          // セル中心でノイズをサンプリング
+          const t = noiseVal(cx + TILE/2, cy + TILE/2);
+          const idx = tileIndex(t);
+          const img = groundImgs[idx];
+          // セルが画面端で128px未満になる場合も対応（clipで超過部分を切る）
+          tCtx.save();
+          tCtx.beginPath();
+          tCtx.rect(cx, cy, Math.min(TILE, W-cx), Math.min(TILE, H-cy));
+          tCtx.clip();
+          tCtx.drawImage(img, cx, cy, TILE, TILE);
+          tCtx.restore();
+        }
       }
-    }
 
-    for(let y = 0; y < H; y++){
-      for(let x = 0; x < W; x++){
-        const t = noise(x, y);
-        const [r, g, b] = terrainColor(t);
-        const idx = (y * W + x) * 4;
-        data[idx]   = r;
-        data[idx+1] = g;
-        data[idx+2] = b;
-        data[idx+3] = 255;
+      // タイル境界を自然に見せるため、境界付近にソフトブレンドを施す
+      // 隣接セルの地形タイプが異なる境界にのみ、細いグラデーション帯を描く
+      tCtx.globalAlpha = 0.35;
+      for(let cy = 0; cy < H; cy += TILE){
+        for(let cx = 0; cx < W; cx += TILE){
+          const t  = noiseVal(cx + TILE/2, cy + TILE/2);
+          const tR = noiseVal(cx + TILE*1.5, cy + TILE/2);
+          const tB = noiseVal(cx + TILE/2, cy + TILE*1.5);
+          const idxC = tileIndex(t);
+          // 右隣と異なるタイプなら右端にブレンド帯
+          if(cx + TILE < W && tileIndex(tR) !== idxC){
+            const g = tCtx.createLinearGradient(cx+TILE-16, 0, cx+TILE+16, 0);
+            const [r1,g1,b1] = fallbackColors[idxC];
+            const [r2,g2,b2] = fallbackColors[tileIndex(tR)];
+            g.addColorStop(0, `rgba(${r1},${g1},${b1},0)`);
+            g.addColorStop(0.5, `rgba(${Math.round((r1+r2)/2)},${Math.round((g1+g2)/2)},${Math.round((b1+b2)/2)},0.6)`);
+            g.addColorStop(1, `rgba(${r2},${g2},${b2},0)`);
+            tCtx.fillStyle = g;
+            tCtx.fillRect(cx+TILE-16, cy, 32, TILE);
+          }
+          // 下隣と異なるタイプなら下端にブレンド帯
+          if(cy + TILE < H && tileIndex(tB) !== idxC){
+            const g = tCtx.createLinearGradient(0, cy+TILE-16, 0, cy+TILE+16);
+            const [r1,g1,b1] = fallbackColors[idxC];
+            const [r2,g2,b2] = fallbackColors[tileIndex(tB)];
+            g.addColorStop(0, `rgba(${r1},${g1},${b1},0)`);
+            g.addColorStop(0.5, `rgba(${Math.round((r1+r2)/2)},${Math.round((g1+g2)/2)},${Math.round((b1+b2)/2)},0.6)`);
+            g.addColorStop(1, `rgba(${r2},${g2},${b2},0)`);
+            tCtx.fillStyle = g;
+            tCtx.fillRect(cx, cy+TILE-16, TILE, 32);
+          }
+        }
       }
-    }
+      tCtx.globalAlpha = 1.0;
 
-    tCtx.putImageData(imageData, 0, 0);
+    } else {
+      // ===== フォールバック: 従来の色塗りモード =====
+      const imageData = tCtx.createImageData(W, H);
+      const data = imageData.data;
+      for(let y = 0; y < H; y++){
+        for(let x = 0; x < W; x++){
+          const t = noiseVal(x, y);
+          const [r, g, b] = fallbackColors[tileIndex(t)];
+          const i = (y * W + x) * 4;
+          data[i]=r; data[i+1]=g; data[i+2]=b; data[i+3]=255;
+        }
+      }
+      tCtx.putImageData(imageData, 0, 0);
+    }
   }
 }
 
@@ -950,9 +1109,42 @@ function triggerAccident(){
   const ay=e.from.y+(e.to.y-e.from.y)*t;
   // 同じ場所に重複しないようにチェック
   if(accidents.some(a=>Math.hypot(a.x-ax,a.y-ay)<60)) return;
-  accidents.push({x:ax,y:ay,edge:e,timer:ACCIDENT_DURATION,maxTimer:ACCIDENT_DURATION,blink:0});
+  const acc = {x:ax,y:ay,edge:e,timer:ACCIDENT_DURATION,maxTimer:ACCIDENT_DURATION,blink:0,policeArrived:false};
+  accidents.push(acc);
   accidentCount++;
-  score=Math.max(0,score-500); // 事故発生ペナルティ -500点
+  score=Math.max(0,score-500);
+
+  // パトカーを事故現場へ派遣
+  dispatchPolice(acc);
+}
+
+// ===== パトカー派遣 =====
+function dispatchPolice(acc){
+  // 外部ノードの中でルートが見つかるものから派遣
+  const extNodes = nodes.filter(n => n.external && n.type === "cross");
+  if(extNodes.length === 0) return;
+
+  // 事故に最も近い cross ノードを目的地にする
+  const intNodes = nodes.filter(n => n.type==="cross" && !n.external);
+  if(intNodes.length === 0) return;
+  const dest = intNodes.sort((a,b) =>
+    Math.hypot(a.x-acc.x,a.y-acc.y) - Math.hypot(b.x-acc.x,b.y-acc.y)
+  )[0];
+
+  // シャッフルした外部ノードからBFSでルートを探す
+  const shuffled = [...extNodes].sort(() => Math.random()-0.5);
+  for(const start of shuffled){
+    const route = generateRouteBFS(start, [dest]);
+    if(route && route.length > 0){
+      const policeCar = new Car(route, policeImg);
+      policeCar.isPolice = true;
+      policeCar.targetAcc = acc;
+      policeCar.maxSpeed = 2.5; // パトカーは少し速い
+      cars.push(policeCar);
+      policeCars.push({car: policeCar, acc});
+      return;
+    }
+  }
 }
 
 // ===== 事故更新 =====
@@ -961,7 +1153,17 @@ function updateAccidents(){
     const a=accidents[i];
     a.timer--;
     a.blink++;
-    if(a.timer<=0) accidents.splice(i,1);
+    if(a.timer<=0){
+      accidents.splice(i,1);
+      // 対応するパトカーを消す（タイムアウト解消）
+      for(const pc of policeCars){
+        if(pc.acc===a) pc.car.alive=false;
+      }
+    }
+  }
+  // 死亡パトカーをリストから除去
+  for(let i=policeCars.length-1;i>=0;i--){
+    if(!policeCars[i].car.alive) policeCars.splice(i,1);
   }
 }
 
@@ -990,6 +1192,11 @@ function drawAccidents(){
     ctx.textAlign="center";
     ctx.textBaseline="middle";
     ctx.fillText("💥",0,0);
+    // パトカー到着済み表示
+    if(a.policeArrived){
+      ctx.font="14px serif";
+      ctx.fillText("🚔",-18,-18);
+    }
 
     // 残り時間バー
     const barW=40, barH=5;
@@ -1007,7 +1214,13 @@ function clearAccident(){
   if(accidents.length===0){ alert("現在、事故は発生していません。"); return; }
   if(score<300){ alert("スコアが不足しています（300点必要）。"); return; }
   score-=300;
-  accidents.splice(0,1); // 最初の事故を解消
+  const removed=accidents.splice(0,1)[0];
+  // 対応パトカーも消す
+  if(removed){
+    for(const pc of policeCars){
+      if(pc.acc===removed) pc.car.alive=false;
+    }
+  }
 }
 
 // 事故クリック検出（canvas上の事故アイコンクリック）
@@ -1084,12 +1297,13 @@ function spawnCar(){
   const img = carImgs[Math.floor(Math.random() * carImgs.length)];
 
   // 目的地の優先度:
-  //  35%: 駐車場を目的地に（駐車場→駐車場 or 外部→駐車場）
-  //  25%: 支線末端を目的地に
-  //  40%: 外部ノード→外部ノード（通常）
+  //  30%: 駐車場を目的地に
+  //  20%: 会社を目的地に
+  //  20%: 支線末端を目的地に
+  //  30%: 外部ノード→外部ノード（通常）
   const rand = Math.random();
 
-  if(rand < 0.35){
+  if(rand < 0.30){
     // 駐車場を目的地に
     const parkings = nodes.filter(n => n.type==="parking" && n !== start);
     if(parkings.length > 0){
@@ -1102,7 +1316,25 @@ function spawnCar(){
         }
       }
     }
-  } else if(rand < 0.60){
+  } else if(rand < 0.50){
+    // 会社を目的地に（BFSでルートが見つかれば）
+    const companies = nodes.filter(n => n.type==="company" && n !== start);
+    if(companies.length > 0){
+      const shuffled = [...companies].sort(() => Math.random() - 0.5);
+      for(const goal of shuffled){
+        // company は cross でないので BFS の終点として直接使えない
+        // → company に最も近い cross ノードを終点にする
+        const nearest = nodes.filter(n=>n.type==="cross"&&!n.external)
+          .sort((a,b)=>Math.hypot(a.x-goal.x,a.y-goal.y)-Math.hypot(b.x-goal.x,b.y-goal.y))[0];
+        if(!nearest) continue;
+        const route = generateRouteBFS(start, [nearest]);
+        if(route && route.length > 0){
+          cars.push(new Car(route, img));
+          return;
+        }
+      }
+    }
+  } else if(rand < 0.70){
     // 支線末端を目的地に
     const terminals = getBranchTerminals();
     if(terminals.length > 0){
@@ -1326,7 +1558,7 @@ function waitForImages(imgs,cb){
   const tick=()=>{ if(--rem<=0&&!done){done=true;cb();} };
   for(const img of imgs){ if(img.complete) tick(); else{ img.onload=tick; img.onerror=tick; } }
 }
-const allImgs=[roadImg,onewayImg,parkImg,parkingImg,riverImg,sigGreenImg,sigRedImg,...carImgs,...houseImgs];
+const allImgs=[roadImg,onewayImg,parkImg,parkingImg,riverImg,...groundImgs,sigGreenImg,sigRedImg,policeImg,...carImgs,...houseImgs,...companyImgs];
 waitForImages(allImgs,()=>{ generateCity(); loop(); console.log("✅ v21 起動"); });
 setTimeout(()=>{ if(!timeCounter){ generateCity(); loop(); console.warn("⚠️ フォールバック"); } },5000);
 </script>
