@@ -59,6 +59,10 @@ input { width:140px; }
   交差点青時間: <input type="range" id="greenSlider" min="60" max="300" value="120"><span id="greenVal">120</span>
   |
   時間帯: <span id="timeLabel">Day</span>
+  | <button id="btnPause" onclick="togglePause()" style="background:#333;color:#fff;border:1px solid #555;padding:2px 8px;cursor:pointer">⏸ 停止</button>
+  <button onclick="setSpeed(1)" style="background:#333;color:#fff;border:1px solid #555;padding:2px 8px;cursor:pointer">×1</button>
+  <button onclick="setSpeed(2)" style="background:#333;color:#fff;border:1px solid #555;padding:2px 8px;cursor:pointer">×2</button>
+  <button onclick="setSpeed(4)" style="background:#333;color:#fff;border:1px solid #555;padding:2px 8px;cursor:pointer">×4</button>
   |
   渋滞: <span id="jam">0</span>
   | 緊急対応(-300pt): <button id="clearAccBtn" onclick="clearAccident()">🚨 対応</button>
@@ -73,10 +77,16 @@ input { width:140px; }
   <div class="sec">🚦 信号管理</div>
   <button class="btn-green"  id="btnInstall" onclick="setMode('install')">信号設置<br><span class="cost-tag">-500pt</span></button>
   <button class="btn-red"    id="btnRemove"  onclick="setMode('remove')">信号撤去<br><span class="cost-tag">-300pt</span></button>
+  <button class="btn-blue"   id="btnRoundabout" onclick="setMode('roundabout')" style="background:#2a6a4a">🔄 環状交差<br><span class="cost-tag">-1500pt</span></button>
   <hr style="border-color:#444;margin:2px 0">
   <div class="sec">🔀 道路操作</div>
   <button class="btn-blue"   id="btnReverse" onclick="setMode('reverse')">一方通行反転<br><span class="cost-tag">-800pt</span></button>
   <button class="btn-blue"   id="btnSignEdit" onclick="setMode('signEdit')" style="background:#2a5a7a">サイン変更<br><span class="cost-tag">-400pt</span></button>
+  <button class="btn-blue" id="btnBlock" onclick="setMode('block')" style="background:#7a1a1a">道路封鎖<br><span class="cost-tag">-2000pt</span></button>
+  <button class="btn-blue" id="btnUnblock" onclick="setMode('unblock')" style="background:#1a5a1a">封鎖解除<br><span class="cost-tag">-500pt</span></button>
+  <hr style="border-color:#444;margin:2px 0">
+  <div class="sec">🚗 渋滞対応</div>
+  <button class="btn-yellow" id="btnRemoveCar" onclick="setMode('removeCar')">車両撤去<br><span class="cost-tag">-200pt/台</span></button>
   <hr style="border-color:#444;margin:2px 0">
   <div class="sec">🚨 緊急</div>
   <button class="btn-yellow" onclick="clearAccident()">事故対応<br><span class="cost-tag">-300pt</span></button>
@@ -99,7 +109,9 @@ let selectedNode = null, timeCounter = 0, flowRate = 0.5;
 let budget = 0;          // 予算（スコアと同期）
 let operationMode = null; // 'install' | 'remove' | 'reverse' | null
 let selectedEdge = null;  // 一方通行反転時の選択エッジ
-let reverseHighlight = null; // 反転ハイライト用エッジ
+let reverseHighlight = null;
+let gamePaused = false;
+let gameSpeed  = 1; // 1,2,4
 let signEditEdge = null;    // サイン変更対象エッジ（選択中）
 
 // ===== スコア・事故 =====
@@ -126,6 +138,7 @@ const groundImgs   = [1,2,3].map(i=>{ const m=new Image(); m.src=`ground_${i}.pn
 const sigGreenImg  = new Image(); sigGreenImg.src  = "shingou_blue.png";
 const sigRedImg    = new Image(); sigRedImg.src    = "shingou_red.png";
 const kousatenImg  = new Image(); kousatenImg.src  = "kousaten.png"; // 交差点画像 300×300px
+const roundaboutImg = new Image(); roundaboutImg.src = "roundabout.png"; // ラウンドアバウト 500×500px
 // 進行方向サイン画像（交差点手前の路面に描画）
 const signImgs = {
   straight:     (() => { const m=new Image(); m.src="s_straight.png";      return m; })(),
@@ -231,6 +244,12 @@ class Node {
       ctx.lineWidth=2.5;
       ctx.strokeRect(this.x-17,this.y-17,34,34);
       ctx.restore();
+    } else if(operationMode==='roundabout'){
+      ctx.save();
+      ctx.strokeStyle = this.isRoundabout ? 'rgba(255,80,80,0.8)' : 'rgba(60,200,120,0.8)';
+      ctx.lineWidth=2.5;
+      ctx.beginPath(); ctx.arc(this.x,this.y,20,0,Math.PI*2); ctx.stroke();
+      ctx.restore();
     }
 
     // 信号なし交差点: 黄色い警戒マーク
@@ -304,6 +323,23 @@ class Edge {
     this.laneCars = Array.from({length:this.lanes}, ()=>[]);
     // signOverride: null=自動判定, Set={'straight','right','left'}=プレイヤー指定
     this.signOverride = null;
+    this.signLaneOverride = new Map();
+    this.blocked = false;
+    // L字曲がり: bendPoint があれば from→bend→to の折れ線
+    this.bendPoint = null; // {x,y} or null
+    this.seg1Len = 0; // from→bend の距離
+    this.seg2Len = 0; // bend→to の距離
+    if(this.bendPoint) this._calcBend();
+  }
+  _calcBend(){
+    const bp = this.bendPoint;
+    this.seg1Len = Math.hypot(bp.x-this.from.x, bp.y-this.from.y);
+    this.seg2Len = Math.hypot(this.to.x-bp.x, this.to.y-bp.y);
+    this.length  = this.seg1Len + this.seg2Len;
+  }
+  setBend(bp){
+    this.bendPoint = bp;
+    this._calcBend();
   }
 }
 
@@ -382,6 +418,14 @@ class Car {
           const canGo=isVert?(toNode.phase===0):(toNode.phase===1);
           if(!canGo){ target=0; this.wait++; }
         }
+      } else if(toNode.isRoundabout){
+        // ラウンドアバウト: 内部（pos>0.5）に車がいれば外から来る車は一時停止
+        // 内部優先ルール: 環内に車がいれば徐行して待つ
+        if(this.pos > 0.70){
+          target = Math.min(target, this.maxSpeed * 0.30);
+          // 同じラウンドアバウトへ向かう先着車は気にしない（どこからでも入れる）
+          // ただしラウンドアバウト内の最内部（pos<0.3 の次エッジ）にいる車がいれば少し待つ
+        }
       } else {
         // 信号なし交差点: 交差点接近時に徐行、他方向から来る車がいれば一時停止
         if(this.pos > 0.65){
@@ -396,8 +440,10 @@ class Car {
             c.pos > 0.60
           );
           if(crossingCars.length > 0){
-            // 先に来ている車（posが大きい）に譲る
-            const mustYield = crossingCars.some(c => c.pos > this.pos + 0.05);
+            const mustYield = crossingCars.some(c =>
+              c.pos > this.pos + 0.05 ||
+              (Math.abs(c.pos - this.pos) <= 0.05 && c.id < this.id)
+            );
             if(mustYield){ target=0; this.wait++; }
           }
         }
@@ -416,6 +462,8 @@ class Car {
       }
     }
 
+    if(this.edge.blocked){ target=0; this.wait++; }
+    // タイムアウト消去は無効（ユーザー要望）
     this.speed+=(target-this.speed)*0.2;
     this.pos+=this.speed/this.edge.length;
     this.pos=Math.min(this.pos,1);
@@ -457,8 +505,6 @@ class Car {
     const vx=to.x-from.x, vy=to.y-from.y;
     const len=Math.sqrt(vx*vx+vy*vy);
     const nx=-vy/len, ny=vx/len;
-
-    // 左側通行: nx負方向(進行左側)にオフセット
     const offset=-(LANE_W/2 + this.lane*LANE_W);
     const cx=from.x+vx*this.pos+nx*offset;
     const cy=from.y+vy*this.pos+ny*offset;
@@ -697,6 +743,89 @@ function generateCity(){
   }
   splitEdgeAndBranch();
 
+  // ================================================================
+  // 2c. L字（直角曲がり）道路の生成
+  // ================================================================
+  // branch/oneway エッジを「独立した新エッジ2本」に置き換えて真のL字を形成。
+  // 元エッジ: from ---直進--- bend(直角点) ---90度折れ--- to
+  // ノードは移動せず、新しい中間ノード(bend node)を追加する。
+  // これにより他エッジへの影響をゼロにする。
+  {
+    const processed = new Set();
+    const toProcess = edges.filter(e=>(e.type==="branch")&&!e.from.external&&!e.to.external);
+    for(const e of toProcess){
+      if(processed.has(e)) continue;
+      // 逆方向の対となるエッジを探す
+      const pair = edges.find(e2=>e2.from===e.to&&e2.to===e.from&&e2.type===e.type);
+      if(!pair || processed.has(pair)) continue;
+      if(Math.random()>0.28) continue;
+
+      const dx=e.to.x-e.from.x, dy=e.to.y-e.from.y;
+      const len=Math.hypot(dx,dy);
+      if(len<100) continue;
+      const ux=dx/len, uy=dy/len;
+      const nx=-uy, ny=ux;
+
+      // bend ノードの位置: fromから進行方向 40〜55% の地点
+      const splitT = 0.40 + Math.random()*0.15;
+      const bendX = Math.round(e.from.x + ux*len*splitT);
+      const bendY = Math.round(e.from.y + uy*len*splitT);
+
+      // to は元の位置のまま。bend→to は自動的に斜め方向になるが、
+      // それではL字にならない。bend→toが垂直になるよう to を移動するが
+      // to ノードが他エッジと共有されている場合は新ノードを作る。
+      const toShared = edges.some(e2=>
+        e2!==e && e2!==pair &&
+        (e2.from===e.to||e2.to===e.to)
+      );
+
+      // 垂直距離: bend から to までの元の残り長さ × 垂直成分
+      const side = Math.random()<0.5?1:-1;
+      const remLen = len*(1-splitT);
+      const newToX = Math.round(bendX + nx*side*remLen);
+      const newToY = Math.round(bendY + ny*side*remLen);
+      if(newToX<20||newToX>980||newToY<20||newToY>680) continue;
+      if(bendX<20||bendX>980||bendY<20||bendY>680) continue;
+
+      // 中間ノード(bend)と新しい終端ノード(newTo)を作成
+      const bendNode = new Node(bendX, bendY, "cross", false, null);
+      bendNode.hasSignal = false;
+      bendNode.external = false;
+      // newTo は元のtoノードを再利用するか新規作成
+      let newToNode;
+      if(toShared){
+        newToNode = new Node(newToX, newToY, "cross", false, null);
+        newToNode.hasSignal = false;
+        newToNode.external = true; // 末端
+      } else {
+        // to ノードの座標を更新
+        e.to.x = newToX; e.to.y = newToY;
+        newToNode = e.to;
+      }
+      nodes.push(bendNode);
+      if(toShared) nodes.push(newToNode);
+
+      // 元エッジを from→bend に短縮
+      e.to = bendNode;
+      e.length = Math.hypot(bendNode.x-e.from.x, bendNode.y-e.from.y);
+      e.laneCars = Array.from({length:e.lanes},()=>[]);
+
+      // bend→newTo の新エッジ追加
+      const seg2 = new Edge(bendNode, newToNode, e.type);
+      edges.push(seg2);
+
+      // pair（逆方向）も同様に
+      pair.from = newToNode; pair.to = bendNode;
+      pair.length = Math.hypot(bendNode.x-newToNode.x, bendNode.y-newToNode.y);
+      pair.laneCars = Array.from({length:pair.lanes},()=>[]);
+
+      const seg2r = new Edge(bendNode, e.from, e.type);
+      edges.push(seg2r);
+
+      processed.add(e); processed.add(pair);
+    }
+  }
+
   // [B] 既存交差点から支線を伸ばす（splitEdgeAndBranch後に再取得して新ノードも含める）
   const allCross=nodes.filter(n=>n.type==="cross"&&!n.external);
 
@@ -865,72 +994,9 @@ function generateCity(){
   }
 
   // ================================================================
-  // 3. 建物・公園・会社（装飾）
+  // 3. 建物配置 → 川生成後に実行（川の上禁止チェックのため後回し）
   // ================================================================
-  // 配置チェック:
-  //   ① 元エッジから適切な距離（道路幅の半分 + 建物半径 + 余白）だけ離す
-  //   ② 全エッジとの最短距離が MIN_BLDG_DIST 以上であることを確認
-  //   ③ 既存建物ノードとも一定距離を保つ
-  {
-    const BLDG_HALF  = 26;  // 建物画像の表示半径（50px画像の半分＋余白）
-    const MIN_BLDG_DIST = 28; // 建物中心〜エッジ中心線の最小距離
-
-    // 全エッジとの距離チェック関数
-    function bldgClearOfRoads(bx, by){
-      for(const e2 of edges){
-        const evx=e2.to.x-e2.from.x, evy=e2.to.y-e2.from.y;
-        const el=Math.hypot(evx,evy);
-        if(el<1) continue;
-        const et=Math.max(0,Math.min(1,((bx-e2.from.x)*evx+(by-e2.from.y)*evy)/(el*el)));
-        const dist=Math.hypot(bx-(e2.from.x+evx*et), by-(e2.from.y+evy*et));
-        // 道路幅の半分 + 建物半径 + 余白 より近ければNG
-        if(dist < e2.lanes*LANE_W + BLDG_HALF) return false;
-      }
-      return true;
-    }
-
-    const drawnPairs=new Set();
-    for(const e of edges){
-      const key=[e.from,e.to].map(n=>`${Math.round(n.x)},${Math.round(n.y)}`).sort().join("|");
-      if(drawnPairs.has(key)) continue;
-      drawnPairs.add(key);
-      if(Math.random()>0.4) continue;
-
-      // 両側（+/-）を試して道路から離れた側を選ぶ
-      let placed = false;
-      for(const sign of [1,-1].sort(()=>Math.random()-0.5)){
-        const t=0.2+Math.random()*0.6;
-        const roadHalf = e.lanes*LANE_W; // 双方向考慮: 片側の道路幅
-        // オフセット = 道路中心線から「道路幅 + 建物半径 + 余白」だけ離す
-        const offset = roadHalf + BLDG_HALF + 8 + Math.random()*12;
-        const vx=e.to.x-e.from.x, vy=e.to.y-e.from.y;
-        const len=Math.sqrt(vx*vx+vy*vy);
-        const bx=e.from.x+vx*t+(-vy/len)*sign*offset;
-        const by=e.from.y+vy*t+(vx/len)*sign*offset;
-
-        if(bx<15||bx>985||by<15||by>685) continue;
-
-        // 全エッジとの距離チェック
-        if(!bldgClearOfRoads(bx, by)) continue;
-
-        // 既存建物ノードとの距離チェック
-        const tooClose = nodes.some(n=>
-          (n.type==="house"||n.type==="park"||n.type==="company") &&
-          Math.hypot(n.x-bx,n.y-by) < BLDG_HALF*2
-        );
-        if(tooClose) continue;
-
-        const roll=Math.random();
-        let type, img;
-        if(roll<0.60){      type="house";   img=houseImgs[Math.floor(Math.random()*houseImgs.length)]; }
-        else if(roll<0.85){ type="company"; img=companyImgs[Math.floor(Math.random()*companyImgs.length)]; }
-        else{               type="park";    img=parkImg; }
-        nodes.push(new Node(bx,by,type,false,img));
-        placed = true;
-        break;
-      }
-    }
-  }
+  // placeBuildingsAfterRivers() を川生成後に呼ぶ
 
   // ================================================================
   // 3b. 駐車場の配置
@@ -1139,6 +1205,77 @@ function generateCity(){
     if(blocked) continue;
     if(Math.random() < 0.85){
       rivers.push({ type:"v", x1, x2 });
+    }
+  }
+
+  // ================================================================
+  // 5b. 建物・公園・会社（川生成後に配置 → 川の上禁止チェックが有効）
+  // ================================================================
+  {
+    const BLDG_HALF = 26;
+    function bldgClearOfRoads(bx, by){
+      for(const e2 of edges){
+        const evx=e2.to.x-e2.from.x, evy=e2.to.y-e2.from.y;
+        const el=Math.hypot(evx,evy);
+        if(el<1) continue;
+        const et=Math.max(0,Math.min(1,((bx-e2.from.x)*evx+(by-e2.from.y)*evy)/(el*el)));
+        const dist=Math.hypot(bx-(e2.from.x+evx*et), by-(e2.from.y+evy*et));
+        if(dist < e2.lanes*LANE_W + BLDG_HALF) return false;
+      }
+      return true;
+    }
+    function isOnRiver(bx, by){
+      return rivers.some(r => {
+        if(r.type==="h") return by > r.y1-10 && by < r.y2+10;
+        if(r.type==="v") return bx > r.x1-10 && bx < r.x2+10;
+        return false;
+      });
+    }
+
+    // 道路沿いに建物を規則的に並べる（住宅地ブロック）
+    // 各エッジに対して両側に複数候補を試みる
+    const drawnPairs=new Set();
+    const SPACING = 44; // 建物の間隔(px)
+
+    for(const e of edges){
+      if(e.from.external || e.to.external) continue;
+      const key=[e.from,e.to].map(n=>`${Math.round(n.x)},${Math.round(n.y)}`).sort().join("|");
+      if(drawnPairs.has(key)) continue;
+      drawnPairs.add(key);
+
+      const vx=e.to.x-e.from.x, vy=e.to.y-e.from.y;
+      const len=Math.sqrt(vx*vx+vy*vy);
+      if(len < 60) continue;
+      const ux=vx/len, uy=vy/len;
+      const nx=-uy, ny=ux; // 法線
+
+      const roadOff = e.lanes*LANE_W + BLDG_HALF + 6;
+
+      for(const side of [1,-1]){
+        // 道路に沿って等間隔に建物を並べる
+        const startT = 12; // 端から少し離す
+        for(let d=startT; d<len-startT; d+=SPACING){
+          const bx = e.from.x + ux*d + nx*side*roadOff;
+          const by = e.from.y + uy*d + ny*side*roadOff;
+
+          if(bx<15||bx>985||by<15||by>685) continue;
+          if(isOnRiver(bx,by)) continue;
+          if(!bldgClearOfRoads(bx,by)) continue;
+          const tooClose = nodes.some(n=>
+            (n.type==="house"||n.type==="park"||n.type==="company"||n.type==="roundabout") &&
+            Math.hypot(n.x-bx,n.y-by) < BLDG_HALF*1.8
+          );
+          if(tooClose) continue;
+
+          // 種別決定: 住宅地なら同じ側に同じ種別が並ぶとリアル
+          const roll=Math.random();
+          let type, img;
+          if(roll<0.70){      type="house";   img=houseImgs[Math.floor(Math.random()*houseImgs.length)]; }
+          else if(roll<0.88){ type="company"; img=companyImgs[Math.floor(Math.random()*companyImgs.length)]; }
+          else{               type="park";    img=parkImg; }
+          nodes.push(new Node(bx,by,type,false,img));
+        }
+      }
     }
   }
 
@@ -1452,6 +1589,25 @@ canvas.addEventListener("click", ev=>{
     return;
   }
 
+  // --- ラウンドアバウト設置モード ---
+  if(operationMode==='roundabout'){
+    const node = nodes.find(n =>
+      n.type==="cross" && !n.external &&
+      Math.abs(n.x-mx)<28 && Math.abs(n.y-my)<28
+    );
+    if(node){
+      if(budget<COST_ROUNDABOUT){ flashBudget(); return; }
+      node.isRoundabout = !node.isRoundabout;
+      node.hasSignal = false; // ラウンドアバウトは信号不要
+      budget-=COST_ROUNDABOUT; score-=COST_ROUNDABOUT;
+      showToast(node.isRoundabout
+        ? '🔄 環状交差点を設置しました (-'+COST_ROUNDABOUT+'pt)'
+        : '🔄 環状交差点を解除しました (-'+COST_ROUNDABOUT+'pt)');
+      updateBudgetButtons();
+    }
+    return;
+  }
+
   // --- 一方通行反転モード: エッジクリック ---
   if(operationMode==='reverse'){
     let bestEdge=null, bestDist=18;
@@ -1507,8 +1663,66 @@ canvas.addEventListener("click", ev=>{
       const dirNames = {straight:'直進', right:'右折', left:'左折'};
       const curStr = [...cur].map(d=>dirNames[d]||d).join('・');
       showToast(`選択中: ${curStr} → 変更先を選択 (-${COST_SIGN}pt)`);
-      showSignEditPopup(bestEdge, autoDirs);
+      // クリック位置から最も近い車線を判定
+      const _dx=bestEdge.to.x-bestEdge.from.x, _dy=bestEdge.to.y-bestEdge.from.y;
+      const _l=Math.hypot(_dx,_dy); if(_l<1){ showSignEditPopup(bestEdge,autoDirs,null); return; }
+      const _ux=_dx/_l,_uy=_dy/_l, _nx=-_uy,_ny=_ux;
+      const _lat=(mx-bestEdge.from.x)*_nx+(my-bestEdge.from.y)*_ny;
+      let _clickedLane=null;
+      for(let ln=0;ln<bestEdge.lanes;ln++){
+        if(Math.abs(_lat+(LANE_W*ln+LANE_W/2))<LANE_W*0.6) _clickedLane=ln;
+      }
+      showSignEditPopup(bestEdge, autoDirs, _clickedLane);
       return;
+    }
+    return;
+  }
+
+  // --- 道路封鎖モード ---
+  if(operationMode==='block' || operationMode==='unblock'){
+    let bestEdge=null, bestDist=18;
+    for(const e of edges){
+      if(operationMode==='unblock' && !e.blocked) continue;
+      const ex=e.to.x-e.from.x, ey=e.to.y-e.from.y, el=Math.hypot(ex,ey);
+      if(el<1) continue;
+      const t=Math.max(0,Math.min(1,((mx-e.from.x)*ex+(my-e.from.y)*ey)/(el*el)));
+      const d=Math.hypot(mx-(e.from.x+ex*t),my-(e.from.y+ey*t));
+      if(d<bestDist){ bestDist=d; bestEdge=e; }
+    }
+    if(bestEdge){
+      if(operationMode==='block'){
+        if(budget<COST_BLOCK){ flashBudget(); return; }
+        bestEdge.blocked=true;
+        for(const c of cars) if(c.edge===bestEdge && !c.isPolice) c.wait=500;
+        budget-=COST_BLOCK; score-=COST_BLOCK;
+        showToast('🚧 道路を封鎖しました (-'+COST_BLOCK+'pt)');
+      } else {
+        if(budget<COST_UNBLOCK){ flashBudget(); return; }
+        bestEdge.blocked=false;
+        budget-=COST_UNBLOCK; score-=COST_UNBLOCK;
+        showToast('🔓 封鎖を解除しました (-'+COST_UNBLOCK+'pt)');
+      }
+      updateBudgetButtons();
+    }
+    return;
+  }
+
+  // --- 車両撤去モード ---
+  if(operationMode==='removeCar'){
+    let bestCar=null, bestDist=20;
+    for(const c of cars){
+      if(!c.alive||c.isPolice) continue;
+      const {from,to}=c.edge;
+      const cx=from.x+(to.x-from.x)*c.pos, cy=from.y+(to.y-from.y)*c.pos;
+      const d=Math.hypot(mx-cx,my-cy);
+      if(d<bestDist){ bestDist=d; bestCar=c; }
+    }
+    if(bestCar){
+      if(budget<COST_REMOVE_CAR){ flashBudget(); return; }
+      bestCar.alive=false;
+      budget-=COST_REMOVE_CAR; score-=COST_REMOVE_CAR;
+      showToast('🚗 車両を撤去しました (-'+COST_REMOVE_CAR+'pt)');
+      updateBudgetButtons();
     }
     return;
   }
@@ -1571,7 +1785,11 @@ function drawReverseHighlight(){
 const COST_INSTALL = 500;
 const COST_REMOVE  = 300;
 const COST_REVERSE = 800;
-const COST_SIGN    = 400; // 進行方向サイン変更コスト
+const COST_SIGN       = 400;  // 進行方向サイン変更
+const COST_REMOVE_CAR = 200;  // 車両撤去
+const COST_BLOCK      = 2000; // 道路封鎖
+const COST_UNBLOCK    = 500;  // 封鎖解除
+const COST_ROUNDABOUT = 1500; // ラウンドアバウト設置
 
 
 // ===== 進行方向サイン変更ポップアップ =====
@@ -1587,7 +1805,8 @@ const SIGN_COMBOS = [
   { key:'auto',         dirs:null,                      label:'自動（リセット）' },
 ];
 
-function showSignEditPopup(targetEdge, autoDirs){
+function showSignEditPopup(targetEdge, autoDirs, laneIndex=null){
+  const laneLabel = laneIndex !== null ? ` (車線${laneIndex+1})` : "";
   // 既存ポップアップ削除
   const old = document.getElementById('signPopup');
   if(old) old.remove();
@@ -1626,7 +1845,7 @@ function showSignEditPopup(targetEdge, autoDirs){
   pop.style.top  = py + 'px';
 
   const title = document.createElement('div');
-  title.textContent = '🛣 進行方向を選択';
+  title.textContent = '🛣 進行方向を選択' + laneLabel;
   title.style.cssText = 'font-weight:bold;margin-bottom:8px;color:#80d0ff;border-bottom:1px solid #444;padding-bottom:4px';
   pop.appendChild(title);
 
@@ -1654,11 +1873,13 @@ function showSignEditPopup(targetEdge, autoDirs){
       budget -= COST_SIGN;
       score  -= COST_SIGN;
       if(combo.key==='auto'){
-        targetEdge.signOverride = null;
+        if(laneIndex !== null) targetEdge.signLaneOverride.delete(laneIndex);
+        else { targetEdge.signOverride=null; targetEdge.signLaneOverride.clear(); }
         showToast('🛣 サインをリセットしました (-'+COST_SIGN+'pt)');
       } else {
-        targetEdge.signOverride = new Set(combo.dirs);
-        showToast('🛣 サインを変更: '+combo.label+' (-'+COST_SIGN+'pt)');
+        if(laneIndex !== null) targetEdge.signLaneOverride.set(laneIndex, new Set(combo.dirs));
+        else targetEdge.signOverride = new Set(combo.dirs);
+        showToast('🛣 サインを変更: '+combo.label+laneLabel+' (-'+COST_SIGN+'pt)');
       }
       // 走行中の車のルートを再生成（影響を即時反映）
       for(const c of cars){
@@ -1698,29 +1919,41 @@ function setMode(mode){
   reverseHighlight = null;
   signEditEdge = null;
   const labels = {
-    install:  '📍 信号設置モード（交差点クリック）',
-    remove:   '🗑 信号撤去モード（交差点クリック）',
-    reverse:  '🔀 一方通行反転モード（道路クリック）',
-    signEdit: '🛣 サイン変更モード（交差点手前の道路クリック）',
+    install:   '📍 信号設置モード（交差点クリック）',
+    remove:    '🗑 信号撤去モード（交差点クリック）',
+    reverse:   '🔀 一方通行反転モード（道路クリック）',
+    signEdit:  '🛣 サイン変更モード（車線クリック）',
+    block:     '🚧 道路封鎖モード（道路クリック -2000pt）',
+    unblock:   '🔓 封鎖解除モード（封鎖道路クリック -500pt）',
+    removeCar:   '🚗 車両撤去モード（車クリック -200pt）',
+    roundabout:  '🔄 環状交差点モード（交差点クリック -1500pt）',
   };
   document.getElementById('modeLabel').textContent =
     mode ? labels[mode] : 'モード: 通常';
   // ボタンのハイライト
-  ['btnInstall','btnRemove','btnReverse','btnSignEdit'].forEach(id=>{
+  ['btnInstall','btnRemove','btnReverse','btnSignEdit','btnBlock','btnUnblock','btnRemoveCar','btnRoundabout'].forEach(id=>{
     document.getElementById(id).classList.remove('btn-active');
   });
-  if(mode==='install')  document.getElementById('btnInstall').classList.add('btn-active');
-  if(mode==='remove')   document.getElementById('btnRemove').classList.add('btn-active');
-  if(mode==='reverse')  document.getElementById('btnReverse').classList.add('btn-active');
-  if(mode==='signEdit') document.getElementById('btnSignEdit').classList.add('btn-active');
+  if(mode==='install')   document.getElementById('btnInstall').classList.add('btn-active');
+  if(mode==='remove')    document.getElementById('btnRemove').classList.add('btn-active');
+  if(mode==='reverse')   document.getElementById('btnReverse').classList.add('btn-active');
+  if(mode==='signEdit')  document.getElementById('btnSignEdit').classList.add('btn-active');
+  if(mode==='block')     document.getElementById('btnBlock').classList.add('btn-active');
+  if(mode==='unblock')   document.getElementById('btnUnblock').classList.add('btn-active');
+  if(mode==='removeCar')  document.getElementById('btnRemoveCar').classList.add('btn-active');
+  if(mode==='roundabout') document.getElementById('btnRoundabout').classList.add('btn-active');
   updateBudgetButtons();
 }
 
 function updateBudgetButtons(){
-  document.getElementById('btnInstall').disabled  = budget < COST_INSTALL;
-  document.getElementById('btnRemove').disabled   = budget < COST_REMOVE;
-  document.getElementById('btnReverse').disabled  = budget < COST_REVERSE;
-  document.getElementById('btnSignEdit').disabled = budget < COST_SIGN;
+  document.getElementById('btnInstall').disabled   = budget < COST_INSTALL;
+  document.getElementById('btnRemove').disabled    = budget < COST_REMOVE;
+  document.getElementById('btnReverse').disabled   = budget < COST_REVERSE;
+  document.getElementById('btnSignEdit').disabled  = budget < COST_SIGN;
+  document.getElementById('btnBlock').disabled     = budget < COST_BLOCK;
+  document.getElementById('btnUnblock').disabled   = budget < COST_UNBLOCK;
+  document.getElementById('btnRemoveCar').disabled  = budget < COST_REMOVE_CAR;
+  document.getElementById('btnRoundabout').disabled = budget < COST_ROUNDABOUT;
 }
 
 function flashBudget(){
@@ -1746,6 +1979,17 @@ function reverseOneway(edge){
   reverseHighlight = null;
   setMode(null);
   showToast('🔀 一方通行を反転しました');
+}
+
+
+function togglePause(){
+  gamePaused = !gamePaused;
+  document.getElementById('btnPause').textContent = gamePaused ? '▶ 再開' : '⏸ 停止';
+}
+function setSpeed(n){
+  gameSpeed = n;
+  gamePaused = false;
+  document.getElementById('btnPause').textContent = '⏸ 停止';
 }
 
 // トースト通知
@@ -1780,9 +2024,14 @@ function generateRouteBFS(startNode, targetNodes){
     for (const e of edges) {
       if (e.from !== node || visited.has(e.to)) continue;
       // signOverride チェック: 前エッジに制限がある場合、許可方向のみ通行
-      if(prevEdge && prevEdge.signOverride !== null){
+      if(e.blocked) continue;
+      if(prevEdge){
         const dir = getDirectionType(prevEdge, e);
-        if(!prevEdge.signOverride.has(dir)) continue; // 禁止方向はスキップ
+        const laneOvr = prevEdge.signLaneOverride && prevEdge.signLaneOverride.size > 0
+          ? [...prevEdge.signLaneOverride.values()].reduce((a,b)=>{ for(const d of b) a.add(d); return a; }, new Set())
+          : null;
+        const effOvr = laneOvr || prevEdge.signOverride;
+        if(effOvr !== null && !effOvr.has(dir)) continue;
       }
       visited.add(e.to);
       const lane = selectLaneForTurn(e, prevEdge);
@@ -2007,31 +2256,9 @@ function drawDirectionSigns(){
     );
     if(outEdges.length === 0) continue;
 
-    // signOverride があればそちらを使用、なければ自動判定
-    const dirs = e.signOverride !== null
-      ? e.signOverride
-      : new Set(outEdges.map(ex => getDirectionType(e, ex)));
-
-    // 方向の組み合わせで画像を選択
-    const hasSt = dirs.has('straight');
-    const hasL  = dirs.has('left');
-    const hasR  = dirs.has('right');
-
-    let signKey = null;
-    if(hasSt && hasL && hasR) signKey = 'st_right_left'; // 全方向
-    else if(hasSt && hasL)    signKey = 'st_left';
-    else if(hasSt && hasR)    signKey = 'st_right';
-    else if(hasL  && hasR)    signKey = 'right_left';
-    else if(hasSt)            signKey = 'straight';
-    else if(hasL)             signKey = 'left';
-    else if(hasR)             signKey = 'right';
-    if(!signKey) continue;
-
-    const img = signImgs[signKey];
-    if(!img || !img.complete || !img.naturalWidth) continue;
-
-    // signEdit モード中は選択中/変更可能エッジをハイライト
-    const isEditing = operationMode==='signEdit';
+    // 自動判定
+    const autoDirs = new Set(outEdges.map(ex => getDirectionType(e, ex)));
+    // signEdit ハイライト
     const isSelected = signEditEdge === e;
 
     // エッジの方向ベクトル（単位ベクトル）
@@ -2062,34 +2289,40 @@ function drawDirectionSigns(){
     const roadAngle = Math.atan2(dy, dx);         // エッジの角度（右=0, 下=π/2）
     const signRotation = roadAngle + Math.PI / 2; // 画像を道路方向に合わせる補正
 
-    // 各車線にサインを描く
+    // 各車線にサインを描く（車線単位オーバーライド対応）
     for(let ln = 0; ln < e.lanes; ln++){
-      // 車線中央の横オフセット量（法線方向、左側通行=負方向）
+      const dirs = e.signLaneOverride.has(ln)
+        ? e.signLaneOverride.get(ln)
+        : (e.signOverride !== null ? e.signOverride : autoDirs);
+      const hasSt=dirs.has('straight'), hasL=dirs.has('left'), hasR=dirs.has('right');
+      let signKey=null;
+      if(hasSt&&hasL&&hasR) signKey='st_right_left';
+      else if(hasSt&&hasL)  signKey='st_left';
+      else if(hasSt&&hasR)  signKey='st_right';
+      else if(hasL&&hasR)   signKey='right_left';
+      else if(hasSt)        signKey='straight';
+      else if(hasL)         signKey='left';
+      else if(hasR)         signKey='right';
+      if(!signKey) continue;
+      const img=signImgs[signKey];
+      if(!img||!img.complete||!img.naturalWidth) continue;
+
       const lateralOffset = -(LANE_W * ln + LANE_W / 2);
-
-      // 交差点パッド境界から手前の位置（進行方向沿い）
-      const alongOffset = dist - trimTo - signH / 2 - 6;
-      if(alongOffset < 2) continue; // エッジが極端に短い場合のみスキップ
-
-      // 描画中心のワールド座標を計算
+      const alongOffset   = dist - trimTo - signH / 2 - 6;
+      if(alongOffset < 2) continue;
       const wx = e.from.x + ux * alongOffset + nx * lateralOffset;
       const wy = e.from.y + uy * alongOffset + ny * lateralOffset;
 
-      // 中心点を基準に回転して描画
       ctx.save();
       ctx.translate(wx, wy);
       ctx.rotate(signRotation);
-      // 選択中エッジは強調枠
       if(isSelected){
-        ctx.strokeStyle='rgba(80,200,255,0.9)';
+        ctx.strokeStyle = e.signLaneOverride.has(ln)
+          ? 'rgba(80,255,150,0.95)' : 'rgba(80,200,255,0.9)';
         ctx.lineWidth=2;
-        ctx.strokeRect(-signW/2-3, -signH/2-3, signW+6, signH+6);
+        ctx.strokeRect(-signW/2-3,-signH/2-3,signW+6,signH+6);
       }
-      ctx.drawImage(img,
-        -signW / 2,
-        -signH / 2,
-        signW, signH
-      );
+      ctx.drawImage(img,-signW/2,-signH/2,signW,signH);
       ctx.restore();
     }
   }
@@ -2111,11 +2344,19 @@ function drawIntersectionPads(){
     const maxW = Math.max(...connEdges.map(e => e.lanes * LANE_W));
     const padSize = maxW * 2; // 正方形の一辺
 
-    if(kReady){
-      // kousaten.png を中心に描画（300×300px → padSizeにスケーリング）
+    if(n.isRoundabout){
+      // ラウンドアバウト: roundabout.png を表示（少し大きめに）
+      const rbSize = Math.max(padSize * 2.2, 80);
+      const rbReady = roundaboutImg.complete && roundaboutImg.naturalWidth > 0;
+      if(rbReady){
+        ctx.drawImage(roundaboutImg, n.x-rbSize/2, n.y-rbSize/2, rbSize, rbSize);
+      } else {
+        ctx.fillStyle="#4a7a4a"; ctx.beginPath();
+        ctx.arc(n.x,n.y,rbSize/2,0,Math.PI*2); ctx.fill();
+      }
+    } else if(kReady){
       ctx.drawImage(kousatenImg, n.x - maxW, n.y - maxW, padSize, padSize);
     } else {
-      // フォールバック: グレー塗りつぶし
       ctx.fillStyle = "#555";
       ctx.fillRect(n.x - maxW, n.y - maxW, padSize, padSize);
     }
@@ -2123,29 +2364,32 @@ function drawIntersectionPads(){
 }
 
 function drawRoad(e){
-  const dx=e.to.x-e.from.x, dy=e.to.y-e.from.y;
-  const fullDist=Math.sqrt(dx*dx+dy*dy);
-  const angle=Math.atan2(dy,dx);
   const roadW=e.lanes*LANE_W;
-
-  // 交差点ノード側はパッドが既に描かれているのでトリムする
-  // トリム量 = 交差点パッドの半径 = そのノードに接続する最大道路幅
   const isInternalCross = n => n.type==="cross" && !n.external;
-
   function padRadius(n){
     if(!isInternalCross(n)) return 0;
     const conn = edges.filter(e2 => e2.from===n || e2.to===n);
     return conn.length > 0 ? Math.max(...conn.map(e2 => e2.lanes * LANE_W)) : 0;
   }
 
+  const dx=e.to.x-e.from.x, dy=e.to.y-e.from.y;
+  const fullDist=Math.sqrt(dx*dx+dy*dy);
   const trimFrom = padRadius(e.from);
   const trimTo   = padRadius(e.to);
   const drawStart = trimFrom;
   const drawLen   = fullDist - trimFrom - trimTo;
   if(drawLen <= 1) return;
+  drawRoadSegmentDirect(e, roadW, drawStart, drawLen, e.from);
+}
+
+function drawRoadSegmentDirect(e, roadW, drawStart, drawLen, fromNode, angle){
+  if(angle===undefined){
+    const dx2=e.to.x-fromNode.x, dy2=e.to.y-fromNode.y;
+    angle=Math.atan2(dy2,dx2);
+  }
 
   ctx.save();
-  ctx.translate(e.from.x, e.from.y);
+  ctx.translate(fromNode.x, fromNode.y);
   ctx.rotate(angle);
 
   // --- 道路ベース色 ---
@@ -2219,6 +2463,26 @@ function drawRoad(e){
       ctx.stroke();
     }
     ctx.setLineDash([]);
+  }
+
+  // --- 封鎖道路: 赤オーバーレイ + 🚧 ---
+  if(e.blocked){
+    ctx.save();
+    ctx.globalAlpha=0.52;
+    ctx.fillStyle='#cc1111';
+    ctx.fillRect(drawStart, -roadW, drawLen, roadW);
+    ctx.globalAlpha=1;
+    ctx.strokeStyle='rgba(255,60,60,0.9)';
+    ctx.lineWidth=2.5; ctx.setLineDash([10,5]);
+    ctx.beginPath(); ctx.moveTo(drawStart,-roadW); ctx.lineTo(drawStart+drawLen,0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(drawStart,0); ctx.lineTo(drawStart+drawLen,-roadW); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font='bold 11px sans-serif';
+    ctx.fillStyle='rgba(255,220,0,0.98)';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    const nSt=Math.max(1,Math.floor(drawLen/55));
+    for(let si=0;si<nSt;si++) ctx.fillText('🚧', drawStart+(drawLen*(si+0.5)/nSt), -roadW/2);
+    ctx.restore();
   }
 
   ctx.restore();
@@ -2328,33 +2592,44 @@ function drawTerrain(){
 let nextAccidentIn = 3600 + Math.floor(Math.random()*3600);
 
 function loop(){
-  ctx.clearRect(0,0,1000,700);
-  updateTime();
-  nodes.forEach(n=>n.update());
-
-  // 事故発生タイマー
-  nextAccidentIn--;
-  if(nextAccidentIn<=0 && cars.length>3){
-    triggerAccident();
-    nextAccidentIn=3600+Math.floor(Math.random()*3600); // 次の事故まで60〜120秒
+  // 一時停止中は描画のみ
+  if(!gamePaused){
+    for(let _spd=0; _spd<gameSpeed; _spd++){
+      updateTime();
+      nodes.forEach(n=>n.update());
+      nextAccidentIn--;
+      if(nextAccidentIn<=0 && cars.length>3){
+        triggerAccident();
+        nextAccidentIn=3600+Math.floor(Math.random()*3600);
+      }
+      updateAccidents();
+      for(const c of cars) c.update();
+      for(let i=cars.length-1;i>=0;i--) if(!cars[i].alive) cars.splice(i,1);
+    }
   }
-  updateAccidents();
-
-  drawTerrain();              // ① 地形（最背面）
-  drawRivers();               // ② 川
-  // ③ 道路描画: 優先順位 branch/oneway → main → 交差点パッド
-  // 後から描いたものが上に来るので、重要な道路を後で描く
-  edges.filter(e=>e.type!=="main").forEach(e=>drawRoad(e)); // ③-a 支線・一方通行（下）
-  edges.filter(e=>e.type==="main").forEach(e=>drawRoad(e)); // ③-b 幹線（中）
-  drawIntersectionPads();     // ③-c 交差点パッド（最上位、全道路を覆う）
-  drawDirectionSigns();       // ③-d 進行方向サイン（交差点手前の路面に描画）
-  for(const c of cars) c.update();
-  for(let i=cars.length-1;i>=0;i--) if(!cars[i].alive) cars.splice(i,1);
+  ctx.clearRect(0,0,1000,700);
+  drawTerrain();
+  drawRivers();
+  edges.filter(e=>e.type!=="main").forEach(e=>drawRoad(e));
+  edges.filter(e=>e.type==="main").forEach(e=>drawRoad(e));
+  drawIntersectionPads();
+  drawDirectionSigns();
   let jam=0;
   for(const c of cars){ c.draw(); if(c.wait>60) jam++; }
-  drawAccidents();        // ④ 事故マーカー
-  drawReverseHighlight(); // ⑤ 反転ハイライト
+  drawAccidents();
+  drawReverseHighlight();
   nodes.forEach(n=>n.draw());
+  // 一時停止インジケーター
+  if(gamePaused){
+    ctx.save();
+    ctx.fillStyle='rgba(0,0,0,0.35)';
+    ctx.fillRect(0,0,1000,700);
+    ctx.fillStyle='rgba(255,255,255,0.9)';
+    ctx.font='bold 48px sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('⏸ PAUSED',500,350);
+    ctx.restore();
+  }
   document.getElementById("jam").textContent=jam;
   updateScore(jam);
   requestAnimationFrame(loop);
@@ -2367,7 +2642,7 @@ function waitForImages(imgs,cb){
   const tick=()=>{ if(--rem<=0&&!done){done=true;cb();} };
   for(const img of imgs){ if(img.complete) tick(); else{ img.onload=tick; img.onerror=tick; } }
 }
-const allImgs=[roadImg,onewayImg,parkImg,parkingImg,riverImg,...groundImgs,sigGreenImg,sigRedImg,kousatenImg,...Object.values(signImgs),policeImg,...carImgs,...houseImgs,...companyImgs];
+const allImgs=[roadImg,onewayImg,parkImg,parkingImg,riverImg,...groundImgs,sigGreenImg,sigRedImg,kousatenImg,roundaboutImg,...Object.values(signImgs),policeImg,...carImgs,...houseImgs,...companyImgs];
 waitForImages(allImgs,()=>{ generateCity(); loop(); console.log("✅ v21 起動"); });
 setTimeout(()=>{ if(!timeCounter){ generateCity(); loop(); console.warn("⚠️ フォールバック"); } },5000);
 </script>
