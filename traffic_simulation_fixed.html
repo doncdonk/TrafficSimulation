@@ -76,6 +76,7 @@ input { width:140px; }
   <hr style="border-color:#444;margin:2px 0">
   <div class="sec">🔀 道路操作</div>
   <button class="btn-blue"   id="btnReverse" onclick="setMode('reverse')">一方通行反転<br><span class="cost-tag">-800pt</span></button>
+  <button class="btn-blue"   id="btnSignEdit" onclick="setMode('signEdit')" style="background:#2a5a7a">サイン変更<br><span class="cost-tag">-400pt</span></button>
   <hr style="border-color:#444;margin:2px 0">
   <div class="sec">🚨 緊急</div>
   <button class="btn-yellow" onclick="clearAccident()">事故対応<br><span class="cost-tag">-300pt</span></button>
@@ -99,6 +100,7 @@ let budget = 0;          // 予算（スコアと同期）
 let operationMode = null; // 'install' | 'remove' | 'reverse' | null
 let selectedEdge = null;  // 一方通行反転時の選択エッジ
 let reverseHighlight = null; // 反転ハイライト用エッジ
+let signEditEdge = null;    // サイン変更対象エッジ（選択中）
 
 // ===== スコア・事故 =====
 let score = 0;
@@ -300,6 +302,8 @@ class Edge {
     this.lanes = (type==="main") ? 2 : 1;
     this.length = Math.hypot(to.x-from.x, to.y-from.y);
     this.laneCars = Array.from({length:this.lanes}, ()=>[]);
+    // signOverride: null=自動判定, Set={'straight','right','left'}=プレイヤー指定
+    this.signOverride = null;
   }
 }
 
@@ -1470,6 +1474,45 @@ canvas.addEventListener("click", ev=>{
     return;
   }
 
+  // --- サイン変更モード: 交差点手前のエッジをクリック ---
+  if(operationMode==='signEdit'){
+    // クリック位置から「交差点に向かうエッジ」の終端付近を検索
+    let bestEdge=null, bestDist=20;
+    for(const e of edges){
+      if(e.to.type!=="cross" || e.to.external) continue;
+      if(e.from.external && e.to.type==="cross"){
+        // 外部→交差点も対象
+      }
+      const ex=e.to.x-e.from.x, ey=e.to.y-e.from.y, el=Math.hypot(ex,ey);
+      if(el<1) continue;
+      const t=Math.max(0,Math.min(1,((mx-e.from.x)*ex+(my-e.from.y)*ey)/(el*el)));
+      // 終端側（交差点手前）t>0.5 の部分に絞る
+      if(t < 0.5) continue;
+      const dist=Math.hypot(mx-(e.from.x+ex*t), my-(e.from.y+ey*t));
+      if(dist<bestDist){ bestDist=dist; bestEdge=e; }
+    }
+    if(!bestEdge){ signEditEdge=null; return; }
+
+    if(signEditEdge !== bestEdge){
+      // 1回目クリック: 対象選択
+      signEditEdge = bestEdge;
+      // このエッジから交差点を出た後の自動判定方向を計算
+      const toNode = bestEdge.to;
+      const outEdges = edges.filter(ex2 =>
+        ex2.from===toNode && !(ex2.to===bestEdge.from)
+      );
+      const autoDirs = new Set(outEdges.map(ex2 => getDirectionType(bestEdge, ex2)));
+      // 現在の方向をトースト表示
+      const cur = bestEdge.signOverride !== null ? bestEdge.signOverride : autoDirs;
+      const dirNames = {straight:'直進', right:'右折', left:'左折'};
+      const curStr = [...cur].map(d=>dirNames[d]||d).join('・');
+      showToast(`選択中: ${curStr} → 変更先を選択 (-${COST_SIGN}pt)`);
+      showSignEditPopup(bestEdge, autoDirs);
+      return;
+    }
+    return;
+  }
+
   // --- 通常モード ---
   // 事故アイコンクリック
   for(let i=accidents.length-1;i>=0;i--){
@@ -1528,31 +1571,156 @@ function drawReverseHighlight(){
 const COST_INSTALL = 500;
 const COST_REMOVE  = 300;
 const COST_REVERSE = 800;
+const COST_SIGN    = 400; // 進行方向サイン変更コスト
+
+
+// ===== 進行方向サイン変更ポップアップ =====
+// クリックされたエッジの交差点手前に変更UIを表示する
+const SIGN_COMBOS = [
+  { key:'straight',     dirs:['straight'],              label:'直進のみ' },
+  { key:'right',        dirs:['right'],                 label:'右折のみ' },
+  { key:'left',         dirs:['left'],                  label:'左折のみ' },
+  { key:'st_right',     dirs:['straight','right'],      label:'直進・右折' },
+  { key:'st_left',      dirs:['straight','left'],       label:'直進・左折' },
+  { key:'right_left',   dirs:['right','left'],          label:'右折・左折' },
+  { key:'st_right_left',dirs:['straight','right','left'],label:'全方向' },
+  { key:'auto',         dirs:null,                      label:'自動（リセット）' },
+];
+
+function showSignEditPopup(targetEdge, autoDirs){
+  // 既存ポップアップ削除
+  const old = document.getElementById('signPopup');
+  if(old) old.remove();
+
+  // ポップアップ要素生成
+  const pop = document.createElement('div');
+  pop.id = 'signPopup';
+  pop.style.cssText = `
+    position:fixed; z-index:10000; background:#1a1a2a; border:1px solid #4a8aff;
+    border-radius:8px; padding:10px; font-size:13px; color:white;
+    box-shadow:0 4px 16px rgba(0,0,0,0.7); min-width:160px;
+  `;
+
+  // エッジの交差点手前位置をCanvas座標→画面座標に変換
+  const r = canvas.getBoundingClientRect();
+  const toNode = targetEdge.to;
+  const dx = toNode.x - targetEdge.from.x;
+  const dy = toNode.y - targetEdge.from.y;
+  const dist = Math.hypot(dx,dy);
+  const ux = dx/dist, uy = dy/dist;
+  const connOut = edges.filter(e2=>e2.from===toNode||e2.to===toNode);
+  const trimTo = connOut.length>0 ? Math.max(...connOut.map(e2=>e2.lanes*LANE_W)) : 0;
+  const placeDist = dist - trimTo - 30;
+  const canvasX = targetEdge.from.x + ux * Math.max(placeDist, dist*0.5);
+  const canvasY = targetEdge.from.y + uy * Math.max(placeDist, dist*0.5);
+  // canvas上の座標をページ座標に変換
+  const scaleX = r.width  / canvas.width;
+  const scaleY = r.height / canvas.height;
+  let px = r.left + canvasX * scaleX;
+  let py = r.top  + canvasY * scaleY + 10;
+  // 画面外にはみ出さないよう調整
+  if(px + 170 > window.innerWidth)  px = window.innerWidth - 175;
+  if(py + 240 > window.innerHeight) py = py - 250;
+
+  pop.style.left = px + 'px';
+  pop.style.top  = py + 'px';
+
+  const title = document.createElement('div');
+  title.textContent = '🛣 進行方向を選択';
+  title.style.cssText = 'font-weight:bold;margin-bottom:8px;color:#80d0ff;border-bottom:1px solid #444;padding-bottom:4px';
+  pop.appendChild(title);
+
+  // 現在の設定
+  const curDirs = targetEdge.signOverride !== null ? targetEdge.signOverride : autoDirs;
+
+  for(const combo of SIGN_COMBOS){
+    const btn = document.createElement('button');
+    const isCurrent = combo.key==='auto'
+      ? targetEdge.signOverride === null
+      : (curDirs.size===combo.dirs.length && combo.dirs.every(d=>curDirs.has(d)));
+
+    btn.textContent = (isCurrent ? '✔ ' : '') + combo.label;
+    btn.style.cssText = `
+      display:block; width:100%; margin:3px 0; padding:5px 8px;
+      background:${isCurrent ? '#1a4a9a' : '#2a2a3a'}; color:white;
+      border:1px solid ${isCurrent ? '#4a8aff' : '#444'};
+      border-radius:4px; cursor:pointer; text-align:left; font-size:12px;
+    `;
+    btn.onmouseover = ()=>btn.style.background='#2a4a6a';
+    btn.onmouseout  = ()=>btn.style.background=isCurrent?'#1a4a9a':'#2a2a3a';
+
+    btn.onclick = ()=>{
+      if(budget < COST_SIGN){ flashBudget(); pop.remove(); return; }
+      budget -= COST_SIGN;
+      score  -= COST_SIGN;
+      if(combo.key==='auto'){
+        targetEdge.signOverride = null;
+        showToast('🛣 サインをリセットしました (-'+COST_SIGN+'pt)');
+      } else {
+        targetEdge.signOverride = new Set(combo.dirs);
+        showToast('🛣 サインを変更: '+combo.label+' (-'+COST_SIGN+'pt)');
+      }
+      // 走行中の車のルートを再生成（影響を即時反映）
+      for(const c of cars){
+        if(!c.isPolice) c.alive = false;
+      }
+      pop.remove();
+      signEditEdge = null;
+      setMode(null);
+      updateBudgetButtons();
+    };
+    pop.appendChild(btn);
+  }
+
+  // 閉じるボタン
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '✕ キャンセル';
+  closeBtn.style.cssText = 'display:block;width:100%;margin-top:6px;padding:4px;background:#333;color:#aaa;border:1px solid #555;border-radius:4px;cursor:pointer;font-size:11px';
+  closeBtn.onclick = ()=>{ pop.remove(); signEditEdge=null; setMode(null); };
+  pop.appendChild(closeBtn);
+
+  document.body.appendChild(pop);
+
+  // 外部クリックで閉じる（少し遅延させてクリックイベントと競合しないように）
+  setTimeout(()=>{
+    const outside = (ev)=>{
+      if(!pop.contains(ev.target)){
+        pop.remove(); signEditEdge=null;
+        document.removeEventListener('click', outside);
+      }
+    };
+    document.addEventListener('click', outside);
+  }, 200);
+}
 
 function setMode(mode){
   operationMode = mode;
   reverseHighlight = null;
+  signEditEdge = null;
   const labels = {
-    install: '📍 信号設置モード（交差点クリック）',
-    remove:  '🗑 信号撤去モード（交差点クリック）',
-    reverse: '🔀 一方通行反転モード（道路クリック）',
+    install:  '📍 信号設置モード（交差点クリック）',
+    remove:   '🗑 信号撤去モード（交差点クリック）',
+    reverse:  '🔀 一方通行反転モード（道路クリック）',
+    signEdit: '🛣 サイン変更モード（交差点手前の道路クリック）',
   };
   document.getElementById('modeLabel').textContent =
     mode ? labels[mode] : 'モード: 通常';
   // ボタンのハイライト
-  ['btnInstall','btnRemove','btnReverse'].forEach(id=>{
+  ['btnInstall','btnRemove','btnReverse','btnSignEdit'].forEach(id=>{
     document.getElementById(id).classList.remove('btn-active');
   });
-  if(mode==='install') document.getElementById('btnInstall').classList.add('btn-active');
-  if(mode==='remove')  document.getElementById('btnRemove').classList.add('btn-active');
-  if(mode==='reverse') document.getElementById('btnReverse').classList.add('btn-active');
+  if(mode==='install')  document.getElementById('btnInstall').classList.add('btn-active');
+  if(mode==='remove')   document.getElementById('btnRemove').classList.add('btn-active');
+  if(mode==='reverse')  document.getElementById('btnReverse').classList.add('btn-active');
+  if(mode==='signEdit') document.getElementById('btnSignEdit').classList.add('btn-active');
   updateBudgetButtons();
 }
 
 function updateBudgetButtons(){
-  document.getElementById('btnInstall').disabled = budget < COST_INSTALL;
-  document.getElementById('btnRemove').disabled  = budget < COST_REMOVE;
-  document.getElementById('btnReverse').disabled = budget < COST_REVERSE;
+  document.getElementById('btnInstall').disabled  = budget < COST_INSTALL;
+  document.getElementById('btnRemove').disabled   = budget < COST_REMOVE;
+  document.getElementById('btnReverse').disabled  = budget < COST_REVERSE;
+  document.getElementById('btnSignEdit').disabled = budget < COST_SIGN;
 }
 
 function flashBudget(){
@@ -1611,8 +1779,12 @@ function generateRouteBFS(startNode, targetNodes){
 
     for (const e of edges) {
       if (e.from !== node || visited.has(e.to)) continue;
+      // signOverride チェック: 前エッジに制限がある場合、許可方向のみ通行
+      if(prevEdge && prevEdge.signOverride !== null){
+        const dir = getDirectionType(prevEdge, e);
+        if(!prevEdge.signOverride.has(dir)) continue; // 禁止方向はスキップ
+      }
       visited.add(e.to);
-      // 交差点での進行方向に応じた初期車線を決定
       const lane = selectLaneForTurn(e, prevEdge);
       queue.push({ node: e.to, path: [...path, { edge: e, lane }], prevEdge: e });
     }
@@ -1641,8 +1813,10 @@ function selectLaneForTurn(curEdge, prevEdge){
   const dot   = inDx * outDx + inDy * outDy;
   const angle = Math.atan2(cross, dot); // -π〜π
 
-  if(angle > Math.PI / 6){
-    // 左折（angle > 30度）→ 外側車線 lane1
+  // Canvas座標はY下向きのため外積の符号が数学と逆:
+  // angle > 0 → 右折, angle < 0 → 左折
+  if(angle < -Math.PI / 6){
+    // 左折（angle < -30度, Canvas Y下向き）→ 外側車線 lane1
     return 1;
   } else {
     // 直進・右折 → 内側車線 lane0
@@ -1784,18 +1958,45 @@ function getDirectionType(inEdge, outEdge){
   const dot   = inDx * outDx + inDy * outDy;
   const angle = Math.atan2(cross, dot); // -π〜π
   if(Math.abs(angle) < Math.PI / 6) return 'straight'; // ±30度以内: 直進
-  if(angle > 0)                     return 'left';      // 正: 左折
-  return 'right';                                       // 負: 右折
+  // Canvas座標はY下向きのため外積の符号が数学と逆:
+  // 外積 > 0 → 時計回り → 右折  (Canvas座標系)
+  // 外積 < 0 → 反時計回り → 左折 (Canvas座標系)
+  if(angle > 0) return 'right'; // 正: 右折（Canvas Y下向き）
+  return 'left';                // 負: 左折（Canvas Y下向き）
 }
 
 function drawDirectionSigns(){
+  // signEdit モード中: 変更可能エッジに📝アイコンを表示
+  if(operationMode==='signEdit'){
+    for(const e of edges){
+      if(e.to.type!=="cross" || e.to.external) continue;
+      const dx2=e.to.x-e.from.x, dy2=e.to.y-e.from.y, dist2=Math.hypot(dx2,dy2);
+      if(dist2<1) continue;
+      const ux2=dx2/dist2, uy2=dy2/dist2, nx2=-uy2, ny2=ux2;
+      const connOut2=edges.filter(e2=>e2.from===e.to||e2.to===e.to);
+      const trimTo2=connOut2.length>0?Math.max(...connOut2.map(e2=>e2.lanes*LANE_W)):0;
+      const aOff=dist2-trimTo2-16;
+      if(aOff<2) continue;
+      const lOff=-(e.lanes*LANE_W/2);
+      const wx2=e.from.x+ux2*aOff+nx2*lOff;
+      const wy2=e.from.y+uy2*aOff+ny2*lOff;
+      ctx.save();
+      ctx.font='10px sans-serif';
+      ctx.textAlign='center';
+      ctx.textBaseline='middle';
+      // 変更済みは青、通常はグレー
+      ctx.fillStyle = e.signOverride !== null ? 'rgba(80,200,255,0.95)' : 'rgba(255,255,255,0.6)';
+      ctx.fillText(e===signEditEdge ? '✏' : '🔧', wx2, wy2-12);
+      ctx.restore();
+    }
+  }
+
   // 内部交差点へ向かうエッジのみ対象
   for(const e of edges){
     const toNode = e.to;
     if(toNode.type !== "cross" || toNode.external) continue;
-    // oneway の逆方向エッジ（実質存在しないが念のため）はスキップ
-    // また外部ノードから来るエッジもスキップ（スポーン地点は不要）
-    if(e.from.external) continue;
+    // toNode が external の場合はスキップ（外側は不要）
+    // from.external は許可（外部から交差点に向かうエッジも表示する）
 
     // このエッジが交差点を通過した後に進める「出口エッジ」を収集
     // ただし折り返し（Uターン）は除外
@@ -1806,8 +2007,10 @@ function drawDirectionSigns(){
     );
     if(outEdges.length === 0) continue;
 
-    // 各出口の方向を判定
-    const dirs = new Set(outEdges.map(ex => getDirectionType(e, ex)));
+    // signOverride があればそちらを使用、なければ自動判定
+    const dirs = e.signOverride !== null
+      ? e.signOverride
+      : new Set(outEdges.map(ex => getDirectionType(e, ex)));
 
     // 方向の組み合わせで画像を選択
     const hasSt = dirs.has('straight');
@@ -1826,6 +2029,10 @@ function drawDirectionSigns(){
 
     const img = signImgs[signKey];
     if(!img || !img.complete || !img.naturalWidth) continue;
+
+    // signEdit モード中は選択中/変更可能エッジをハイライト
+    const isEditing = operationMode==='signEdit';
+    const isSelected = signEditEdge === e;
 
     // エッジの方向ベクトル（単位ベクトル）
     const dx  = toNode.x - e.from.x;
@@ -1862,7 +2069,7 @@ function drawDirectionSigns(){
 
       // 交差点パッド境界から手前の位置（進行方向沿い）
       const alongOffset = dist - trimTo - signH / 2 - 6;
-      if(alongOffset < signH) continue;
+      if(alongOffset < 2) continue; // エッジが極端に短い場合のみスキップ
 
       // 描画中心のワールド座標を計算
       const wx = e.from.x + ux * alongOffset + nx * lateralOffset;
@@ -1872,6 +2079,12 @@ function drawDirectionSigns(){
       ctx.save();
       ctx.translate(wx, wy);
       ctx.rotate(signRotation);
+      // 選択中エッジは強調枠
+      if(isSelected){
+        ctx.strokeStyle='rgba(80,200,255,0.9)';
+        ctx.lineWidth=2;
+        ctx.strokeRect(-signW/2-3, -signH/2-3, signW+6, signH+6);
+      }
       ctx.drawImage(img,
         -signW / 2,
         -signH / 2,
