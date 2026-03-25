@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>マップエディタ</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;color:#e0e0e0;font-family:monospace;font-size:12px;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+#toolbar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#0f0f1e;border-bottom:1px solid #333;flex-wrap:wrap}
+#toolbar label{color:#aaa}
+.tool-btn{padding:4px 10px;border:1px solid #555;background:#222;color:#ccc;cursor:pointer;border-radius:3px;font-size:11px}
+.tool-btn.active{background:#2a5a9a;border-color:#4a8aff;color:#fff}
+.tool-btn:hover{background:#333}
+#road-type-btns{display:flex;gap:4px}
+#mode-btns{display:flex;gap:4px}
+#info{color:#888;font-size:11px;min-width:200px}
+#main{display:flex;flex:1;overflow:hidden}
+#canvas-wrap{position:relative;overflow:auto;flex:1;background:#111}
+canvas{display:block;cursor:crosshair}
+#sidebar{width:280px;background:#141428;border-left:1px solid #333;display:flex;flex-direction:column;overflow:hidden}
+#sidebar-tabs{display:flex;border-bottom:1px solid #333}
+.tab-btn{flex:1;padding:6px;background:#0f0f1e;border:none;color:#888;cursor:pointer;font-size:11px}
+.tab-btn.active{color:#fff;background:#141428;border-bottom:2px solid #4a8aff}
+#tab-content{flex:1;overflow-y:auto;padding:8px}
+#output{width:100%;height:100%;background:#0a0a18;color:#8aff8a;font-size:10px;border:none;resize:none;padding:6px;outline:none}
+.section{margin-bottom:12px}
+.section-title{color:#4a8aff;margin-bottom:4px;font-size:11px;font-weight:bold}
+.prop-row{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.prop-row label{color:#aaa;min-width:80px;font-size:11px}
+.prop-row input,select{background:#222;border:1px solid #444;color:#fff;padding:2px 4px;font-size:11px;width:80px}
+.seg-list{max-height:200px;overflow-y:auto}
+.seg-item{padding:3px 6px;border-bottom:1px solid #222;cursor:pointer;font-size:10px;display:flex;justify-content:space-between;align-items:center}
+.seg-item:hover{background:#1a1a3a}
+.seg-item.selected{background:#1a2a4a}
+.seg-item .del{color:#f44;cursor:pointer;padding:0 4px}
+.legend{display:flex;flex-direction:column;gap:4px;margin-bottom:8px}
+.legend-row{display:flex;align-items:center;gap:6px}
+.legend-color{width:24px;height:4px;border-radius:2px}
+#status{padding:3px 10px;background:#0f0f1e;border-top:1px solid #333;color:#666;font-size:10px}
+button.action{padding:4px 12px;background:#2a4a7a;border:1px solid #4a7aaa;color:#adf;cursor:pointer;border-radius:3px;font-size:11px;margin:2px}
+button.action:hover{background:#3a5a9a}
+button.action.danger{background:#4a1a1a;border-color:#aa4a4a;color:#faa}
+button.action.success{background:#1a4a2a;border-color:#4aaa6a;color:#afa}
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <span style="color:#4a8aff;font-weight:bold;font-size:13px">🗺 MAP EDITOR</span>
+  <span style="color:#444">|</span>
+  <label>モード:</label>
+  <div id="mode-btns">
+    <button class="tool-btn active" id="mode-draw" onclick="setMode('draw')">✏ 描画</button>
+    <button class="tool-btn" id="mode-select" onclick="setMode('select')">↖ 選択</button>
+    <button class="tool-btn" id="mode-erase" onclick="setMode('erase')">🗑 消去</button>
+  </div>
+  <span style="color:#444">|</span>
+  <label>道路種別:</label>
+  <div id="road-type-btns">
+    <button class="tool-btn active" id="type-main" onclick="setRoadType('main')" style="border-color:#888880">幹線</button>
+    <button class="tool-btn" id="type-branch" onclick="setRoadType('branch')" style="border-color:#4a7ab0">支線</button>
+    <button class="tool-btn" id="type-oneway" onclick="setRoadType('oneway')" style="border-color:#40a848">一方通行↗</button>
+    <button class="tool-btn" id="type-railway" onclick="setRoadType('railway')" style="border-color:#7a5035">線路</button>
+  </div>
+  <span style="color:#444">|</span>
+  <button class="tool-btn" onclick="undoLast()">↩ Undo</button>
+  <button class="tool-btn danger" onclick="clearAll()">🗑 全消去</button>
+  <span style="color:#444">|</span>
+  <button class="tool-btn success" onclick="compileMap()">⚙ コンパイル</button>
+  <button class="tool-btn success" onclick="showExport()">📋 エクスポート</button>
+  <span style="color:#444">|</span>
+  <div id="info">クリック: 始点, ドラッグ or 2クリック: 終点</div>
+</div>
+<div id="main">
+  <div id="canvas-wrap">
+    <canvas id="editorCanvas"></canvas>
+  </div>
+  <div id="sidebar">
+    <div id="sidebar-tabs">
+      <button class="tab-btn active" onclick="showTab('segments')">セグメント</button>
+      <button class="tab-btn" onclick="showTab('nodes')">ノード</button>
+      <button class="tab-btn" onclick="showTab('output')">出力</button>
+    </div>
+    <div id="tab-content">
+      <div id="tab-segments">
+        <div class="section">
+          <div class="legend">
+            <div class="legend-row"><div class="legend-color" style="background:#888880;height:6px"></div><span>幹線 (main)</span></div>
+            <div class="legend-row"><div class="legend-color" style="background:#4a7ab0;height:4px"></div><span>支線 (branch)</span></div>
+            <div class="legend-row"><div class="legend-color" style="background:#40a848;height:4px"></div><span>一方通行 (oneway) ↗矢印付き</span></div>
+            <div class="legend-row"><div class="legend-color" style="background:#7a5035;height:4px;background:repeating-linear-gradient(90deg,#7a5035 0,#7a5035 6px,#5a3a25 6px,#5a3a25 10px)"></div><span>線路 (railway)</span></div>
+          </div>
+          <div style="display:flex;gap:4px;margin-bottom:6px">
+            <button class="action" onclick="compileMap()">⚙ コンパイル</button>
+            <button class="action success" onclick="showExport()">📋 エクスポート</button>
+          </div>
+          <div class="section-title">セグメント一覧 (<span id="seg-count">0</span>本)</div>
+          <div id="seg-list" class="seg-list"></div>
+        </div>
+      </div>
+      <div id="tab-nodes" style="display:none">
+        <div class="section">
+          <div class="section-title">コンパイル結果</div>
+          <div id="node-info" style="color:#aaa;font-size:10px">まだコンパイルしていません</div>
+        </div>
+      </div>
+      <div id="tab-output" style="display:none;height:calc(100% - 40px)">
+        <textarea id="output" placeholder="コンパイル後にコードが表示されます..."></textarea>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="status">グリッド: 18px (1車線) | キャンバス: 1000×700 | Shift+クリック: グリッドスナップOFF</div>
+
+<script>
+const GRID = 18;
+const W = 1000, H = 700;
+const LANE_W = 18;
+
+const canvas = document.getElementById('editorCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = W;
+canvas.height = H;
+
+// 状態
+let mode = 'draw';
+let roadType = 'main';
+let segments = []; // {x1,y1,x2,y2,type}
+let compiled = null; // {nodes, edges}
+let drawStart = null; // 描画中の始点
+let mousePos = {x:0, y:0};
+let selectedSeg = -1;
+let hoveredSeg = -1;
+
+// 色定義
+const COLORS = {
+  main:    {stroke:'#c8c8c0', width:6, hover:'#ffff80'},
+  branch:  {stroke:'#6a9ad0', width:4, hover:'#80d0ff'},
+  oneway:  {stroke:'#40c850', width:3, hover:'#80ff80'},
+  railway: {stroke:'#9a7055', width:3, hover:'#d0a080', dash:[6,4]},
+};
+const GRID_COL_MINOR = 'rgba(0,200,80,0.12)';
+const GRID_COL_MID   = 'rgba(0,200,80,0.22)';
+const GRID_COL_MAJOR = 'rgba(0,200,80,0.45)';
+
+function snap(v){ return Math.round(v/GRID)*GRID; }
+function snapPt(x,y,noSnap){ return noSnap ? {x,y} : {x:snap(x),y:snap(y)}; }
+function ptEq(a,b){ return a.x===b.x && a.y===b.y; }
+function segLen(s){ return Math.hypot(s.x2-s.x1, s.y2-s.y1); }
+function isHorz(s){ return Math.abs(s.y2-s.y1) < Math.abs(s.x2-s.x1); }
+
+// ===== 描画 =====
+function draw(){
+  ctx.clearRect(0,0,W,H);
+
+  // 背景
+  ctx.fillStyle = '#1a2010';
+  ctx.fillRect(0,0,W,H);
+
+  // グリッド
+  ctx.save();
+  for(let x=0;x<=W;x+=GRID){
+    ctx.strokeStyle = (x%(GRID*10)===0) ? GRID_COL_MAJOR : (x%(GRID*5)===0) ? GRID_COL_MID : GRID_COL_MINOR;
+    ctx.lineWidth   = (x%(GRID*10)===0) ? 0.8 : 0.4;
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke();
+  }
+  for(let y=0;y<=H;y+=GRID){
+    ctx.strokeStyle = (y%(GRID*10)===0) ? GRID_COL_MAJOR : (y%(GRID*5)===0) ? GRID_COL_MID : GRID_COL_MINOR;
+    ctx.lineWidth   = (y%(GRID*10)===0) ? 0.8 : 0.4;
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+  }
+  ctx.restore();
+
+  // セグメント描画
+  segments.forEach((s,i) => {
+    const c = COLORS[s.type];
+    ctx.save();
+    ctx.strokeStyle = (i===selectedSeg) ? '#ffff00' : (i===hoveredSeg) ? c.hover : c.stroke;
+    ctx.lineWidth   = c.width;
+    if(c.dash) ctx.setLineDash(c.dash);
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(s.x1,s.y1); ctx.lineTo(s.x2,s.y2); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 端点
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath(); ctx.arc(s.x1,s.y1,3,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(s.x2,s.y2,3,0,Math.PI*2); ctx.fill();
+
+    // oneway: 矢印を中間に描画
+    if(s.type==='oneway'){
+      const mx=(s.x1+s.x2)/2, my=(s.y1+s.y2)/2;
+      const ang=Math.atan2(s.y2-s.y1,s.x2-s.x1);
+      ctx.save();
+      ctx.translate(mx,my); ctx.rotate(ang);
+      ctx.fillStyle=i===selectedSeg?'#ffff00':i===hoveredSeg?'#80ff80':'#40c850';
+      ctx.beginPath(); ctx.moveTo(8,0); ctx.lineTo(-6,-5); ctx.lineTo(-6,5); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+    ctx.restore();
+  });
+
+  // コンパイル結果のノード描画
+  if(compiled){
+    compiled.nodes.forEach(n => {
+      ctx.save();
+      if(n.external){
+        ctx.strokeStyle='#aaa'; ctx.fillStyle='rgba(150,150,150,0.3)';
+        ctx.lineWidth=1;
+        ctx.beginPath(); ctx.arc(n.x,n.y,5,0,Math.PI*2); ctx.fill(); ctx.stroke();
+      } else {
+        ctx.strokeStyle='#ff8040'; ctx.fillStyle='rgba(255,128,64,0.4)';
+        ctx.lineWidth=1.5;
+        ctx.beginPath(); ctx.arc(n.x,n.y,6,0,Math.PI*2); ctx.fill(); ctx.stroke();
+        if(n.hasSignal){
+          ctx.fillStyle='#ffe040'; ctx.font='9px sans-serif'; ctx.textAlign='center';
+          ctx.fillText('信',n.x,n.y-9);
+        }
+      }
+      ctx.restore();
+    });
+  }
+
+  // 描画中のプレビュー
+  if(drawStart && mode==='draw'){
+    const c = COLORS[roadType];
+    const {x,y} = mousePos;
+    ctx.save();
+    ctx.strokeStyle = c.stroke; ctx.lineWidth = c.width; ctx.globalAlpha=0.5;
+    if(c.dash) ctx.setLineDash(c.dash);
+    ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(drawStart.x,drawStart.y); ctx.lineTo(x,y); ctx.stroke();
+    ctx.setLineDash([]);
+    // 始点マーカー
+    ctx.globalAlpha=1; ctx.fillStyle='#ffff40';
+    ctx.beginPath(); ctx.arc(drawStart.x,drawStart.y,5,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  // マウスカーソルのスナップ点
+  const {x,y} = mousePos;
+  ctx.save();
+  ctx.strokeStyle='rgba(100,255,100,0.7)'; ctx.lineWidth=0.8;
+  ctx.beginPath(); ctx.moveTo(x-8,y); ctx.lineTo(x+8,y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x,y-8); ctx.lineTo(x,y+8); ctx.stroke();
+  ctx.restore();
+
+  // 座標表示
+  ctx.save();
+  ctx.fillStyle='rgba(0,200,80,0.9)'; ctx.font='bold 10px monospace';
+  ctx.fillText(`(${x},${y})`,x+10,y-4);
+  ctx.restore();
+}
+
+// ===== マウスイベント =====
+function getPos(e){
+  const r = canvas.getBoundingClientRect();
+  const rx = e.clientX - r.left, ry = e.clientY - r.top;
+  return snapPt(rx, ry, e.shiftKey);
+}
+
+function distToSeg(px,py,s){
+  const dx=s.x2-s.x1, dy=s.y2-s.y1;
+  const len2=dx*dx+dy*dy;
+  if(len2===0) return Math.hypot(px-s.x1,py-s.y1);
+  const t=Math.max(0,Math.min(1,((px-s.x1)*dx+(py-s.y1)*dy)/len2));
+  return Math.hypot(px-(s.x1+dx*t), py-(s.y1+dy*t));
+}
+
+function findSegAt(px,py){
+  let best=-1, bestD=Infinity;
+  segments.forEach((s,i) => {
+    const d = distToSeg(px,py,s);
+    if(d<8 && d<bestD){ bestD=d; best=i; }
+  });
+  return best;
+}
+
+canvas.addEventListener('mousemove', e => {
+  const {x,y} = getPos(e);
+  mousePos = {x,y};
+  if(mode==='select'||mode==='erase') hoveredSeg = findSegAt(x,y);
+  else hoveredSeg = -1;
+  document.getElementById('info').textContent = `cursor: ${x}, ${y}${drawStart?' | 始点: '+drawStart.x+','+drawStart.y:''}`;
+  draw();
+});
+
+canvas.addEventListener('click', e => {
+  const {x,y} = getPos(e);
+  if(mode==='draw'){
+    if(!drawStart){
+      drawStart = {x,y};
+    } else {
+      if(!ptEq(drawStart,{x,y})){
+        addSegment(drawStart.x, drawStart.y, x, y, roadType);
+      }
+      drawStart = null;
+    }
+  } else if(mode==='erase'){
+    const i = findSegAt(x,y);
+    if(i>=0){ segments.splice(i,1); updateSegList(); compiled=null; }
+  } else if(mode==='select'){
+    selectedSeg = findSegAt(x,y);
+    updateSegList();
+  }
+  draw();
+});
+
+canvas.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  drawStart = null;
+  draw();
+});
+
+// ダブルクリックでも確定
+canvas.addEventListener('dblclick', e => {
+  if(mode==='draw' && drawStart){
+    drawStart = null;
+    draw();
+  }
+});
+
+// ===== セグメント操作 =====
+function addSegment(x1,y1,x2,y2,type){
+  // 水平または垂直に正規化（斜め線は警告）
+  if(x1!==x2 && y1!==y2){
+    // 斜め → 水平か垂直かを選ぶ（距離が大きい方）
+    if(Math.abs(x2-x1) >= Math.abs(y2-y1)) y2=y1;
+    else x2=x1;
+  }
+  if(x1===x2 && y1===y2) return;
+  segments.push({x1,y1,x2,y2,type});
+  compiled = null;
+  updateSegList();
+}
+
+function undoLast(){
+  segments.pop();
+  drawStart=null;
+  compiled=null;
+  updateSegList();
+  draw();
+}
+
+function clearAll(){
+  if(!confirm('全セグメントを削除しますか？')) return;
+  segments=[]; drawStart=null; compiled=null;
+  updateSegList(); draw();
+}
+
+function updateSegList(){
+  document.getElementById('seg-count').textContent = segments.length;
+  const list = document.getElementById('seg-list');
+  list.innerHTML = segments.map((s,i) => {
+    const len = Math.round(segLen(s));
+    const dir = s.x1===s.x2 ? '縦' : '横';
+    const col = {main:'#c8c8c0',branch:'#6a9ad0',railway:'#9a7055'}[s.type];
+    return `<div class="seg-item${i===selectedSeg?' selected':''}" onclick="selectedSeg=${i};draw()">
+      <span style="color:${col}">[${s.type}] ${dir} (${s.x1},${s.y1})→(${s.x2},${s.y2}) ${len}px</span>
+      <span class="del" onclick="event.stopPropagation();segments.splice(${i},1);compiled=null;updateSegList();draw()">×</span>
+    </div>`;
+  }).join('');
+}
+
+// ===== コンパイル =====
+function compileMap(){
+  if(segments.length===0){ alert('セグメントがありません'); return; }
+
+  const nodes = [];
+  const edges = [];
+
+  function mkNode(x,y,external){
+    let n = nodes.find(nd=>nd.x===x&&nd.y===y);
+    if(!n){
+      n = {x,y,external:!!external,hasSignal:false,id:nodes.length};
+      nodes.push(n);
+    }
+    return n;
+  }
+
+  // 1. 全線分の端点とキャンバス端ノードを収集
+  // 2. 線分同士の交点を計算してノードを追加
+  // 3. 各線分をノード間のセグメントに分割してエッジ生成
+
+  const roadSegs = segments.filter(s=>s.type!=='railway');
+  // oneway は方向付きエッジとして生成（逆向きエッジなし）
+  const railSegs  = segments.filter(s=>s.type==='railway');
+
+  // 端点の収集
+  const allPoints = [];
+  function addPt(x,y,external){ allPoints.push({x,y,external:!!external}); }
+
+  roadSegs.forEach(s => {
+    const extA = (s.x1<=0||s.x1>=W-1||s.y1<=0||s.y1>=H-1);
+    const extB = (s.x2<=0||s.x2>=W-1||s.y2<=0||s.y2>=H-1);
+    addPt(s.x1,s.y1,extA);
+    addPt(s.x2,s.y2,extB);
+  });
+
+  // 線分同士の交点計算
+  function segIntersect(a,b){
+    // 水平+垂直のみ想定
+    if(a.x1===a.x2 && b.y1===b.y2){ // aが縦, bが横
+      const x=a.x1, y=b.y1;
+      if(Math.min(a.y1,a.y2)<=y && y<=Math.max(a.y1,a.y2) &&
+         Math.min(b.x1,b.x2)<=x && x<=Math.max(b.x1,b.x2))
+        return {x,y};
+    }
+    if(a.y1===a.y2 && b.x1===b.x2){ // aが横, bが縦
+      const x=b.x1, y=a.y1;
+      if(Math.min(a.x1,a.x2)<=x && x<=Math.max(a.x1,a.x2) &&
+         Math.min(b.y1,b.y2)<=y && y<=Math.max(b.y1,b.y2))
+        return {x,y};
+    }
+    return null;
+  }
+
+  for(let i=0;i<roadSegs.length;i++){
+    for(let j=i+1;j<roadSegs.length;j++){
+      const pt = segIntersect(roadSegs[i],roadSegs[j]);
+      if(pt) addPt(pt.x,pt.y,false);
+    }
+  }
+  // 重複除去してノード生成
+  const seen = new Set();
+  allPoints.forEach(p=>{
+    const key=`${p.x},${p.y}`;
+    if(!seen.has(key)){
+      seen.add(key);
+      mkNode(p.x,p.y,p.external);
+    }
+  });
+
+  // 各道路セグメントを交点ノードで分割してエッジ追加
+  roadSegs.forEach(s => {
+    // このセグメント上に乗っているノードを並べる
+    const onSeg = nodes.filter(n => {
+      if(s.x1===s.x2) return n.x===s.x1 && n.y>=Math.min(s.y1,s.y2) && n.y<=Math.max(s.y1,s.y2);
+      if(s.y1===s.y2) return n.y===s.y1 && n.x>=Math.min(s.x1,s.x2) && n.x<=Math.max(s.x1,s.x2);
+      return false;
+    }).sort((a,b) => s.x1===s.x2 ? a.y-b.y : a.x-b.x);
+
+    if(s.x1>s.x2||s.y1>s.y2){
+      onSeg.reverse();
+    }
+
+    for(let i=0;i<onSeg.length-1;i++){
+      const a=onSeg[i], b=onSeg[i+1];
+      if(a!==b){
+        if(s.type==='oneway'){
+          // 一方通行: 描画方向(x1,y1→x2,y2)に沿った一方向のみ
+          edges.push({from:a,to:b,type:'oneway'});
+        } else {
+          edges.push({from:a,to:b,type:s.type});
+          edges.push({from:b,to:a,type:s.type});
+        }
+      }
+    }
+  });
+
+  // hasSignal: 内部交差点（接続数≥3）に信号
+  nodes.forEach(n => {
+    if(n.external) return;
+    const conn = edges.filter(e=>e.from===n||e.to===n);
+    const uniqueNeighbors = new Set(conn.map(e=>e.from===n?e.to.id:e.from.id));
+    n.hasSignal = uniqueNeighbors.size >= 3;
+    n.isRealCross = n.hasSignal;
+  });
+
+  compiled = {nodes, edges, railways: railSegs};
+
+  // ノード情報表示
+  const crossCount = nodes.filter(n=>!n.external&&n.hasSignal).length;
+  document.getElementById('node-info').innerHTML =
+    `<b style="color:#adf">ノード: ${nodes.length}</b> (外部: ${nodes.filter(n=>n.external).length}, 交差点: ${crossCount})<br>` +
+    `<b style="color:#adf">エッジ: ${edges.length}</b> (幹線: ${edges.filter(e=>e.type==='main').length/2}本, 支線: ${edges.filter(e=>e.type==='branch').length/2}本)<br>` +
+    `<b style="color:#adf">線路: ${railSegs.length}</b> セグメント`;
+
+  draw();
+  generateCode();
+  showTab('output');
+}
+
+// ===== コード生成 =====
+function generateCode(){
+  if(!compiled){ document.getElementById('output').value='先にコンパイルしてください'; return; }
+  const {nodes,edges,railways} = compiled;
+
+  const nodeNames = {};
+  let ni=0;
+  nodes.forEach(n => {
+    nodeNames[n.id] = n.external ? `ext_${ni++}` : `n${ni++}`;
+  });
+
+  const lines = [];
+  lines.push(`// ===== 自動生成マップ =====`);
+  lines.push(`// セグメント数: ${segments.length}, ノード: ${nodes.length}, エッジ: ${edges.length/2}`);
+  lines.push(`"my_map_${Date.now().toString(36)}": {`);
+  lines.push(`  label: "新しいマップ",`);
+  lines.push(`  build(mkN, addE) {`);
+  lines.push(`    const W=1000, H=700;`);
+  lines.push(``);
+
+  // ノード定義
+  lines.push(`    // ===== ノード =====`);
+  nodes.forEach(n => {
+    const name = nodeNames[n.id];
+    lines.push(`    const ${name} = mkN(${n.x}, ${n.y}, "cross", ${n.external});`);
+    if(n.hasSignal) lines.push(`    ${name}.hasSignal = true; ${name}.isRealCross = true;`);
+  });
+  lines.push(``);
+
+  // エッジ定義（重複除去: from.id < to.id のペアのみ出力）
+  lines.push(`    // ===== エッジ =====`);
+  const done = new Set();
+  edges.forEach(e => {
+    if(e.type==='oneway'){
+      // 一方通行は方向固定で1本ずつ出力
+      const key = `${e.from.id}>${e.to.id}`;
+      if(done.has(key)) return;
+      done.add(key);
+      const a = nodeNames[e.from.id], b = nodeNames[e.to.id];
+      lines.push(`    addE(${a}, ${b}, "oneway");`);
+    } else {
+      const key = e.from.id < e.to.id ? `${e.from.id}-${e.to.id}` : `${e.to.id}-${e.from.id}`;
+      if(done.has(key)) return;
+      done.add(key);
+      const a = nodeNames[e.from.id], b = nodeNames[e.to.id];
+      lines.push(`    addE(${a}, ${b}, "${e.type}"); addE(${b}, ${a}, "${e.type}");`);
+    }
+  });
+  lines.push(``);
+
+  // 線路
+  if(railways.length>0){
+    lines.push(`    // ===== 線路（手動設定が必要）=====`);
+    lines.push(`    // TODO: railways.push({`);
+    lines.push(`    //   segments: [`);
+    railways.forEach(r => {
+      const dir = r.x1===r.x2 ? 'v' : 'h';
+      lines.push(`    //     {x1:${r.x1}, y1:${r.y1}, x2:${r.x2}, y2:${r.y2}, dir:'${dir}'},`);
+    });
+    lines.push(`    //   ],`);
+    lines.push(`    //   crossings: [], trainPos:0, trainSpeed:0.0005, totalLength:XXX`);
+    lines.push(`    // });`);
+    lines.push(``);
+  }
+
+  lines.push(`  }`);
+  lines.push(`},`);
+
+  document.getElementById('output').value = lines.join('\n');
+}
+
+function showExport(){
+  showTab('output');
+  if(!compiled){ compileMap(); }
+  const out = document.getElementById('output');
+  out.select();
+  try{ document.execCommand('copy'); }catch(e){}
+  alert('クリップボードにコピーしました！\nゲームのFIXED_MAPSブロックに貼り付けてください。');
+}
+
+// ===== UI制御 =====
+function setMode(m){
+  mode=m; drawStart=null;
+  document.querySelectorAll('#mode-btns .tool-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('mode-'+m).classList.add('active');
+  canvas.style.cursor = m==='draw'?'crosshair':m==='erase'?'cell':'default';
+  draw();
+}
+
+function setRoadType(t){
+  roadType=t;
+  document.querySelectorAll('#road-type-btns .tool-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('type-'+t).classList.add('active');
+}
+
+function showTab(name){
+  document.querySelectorAll('#tab-content > div').forEach(d=>d.style.display='none');
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-'+name).style.display = name==='output'?'flex':'block';
+  const tabs = ['segments','nodes','output'];
+  const idx = tabs.indexOf(name);
+  document.querySelectorAll('.tab-btn')[idx].classList.add('active');
+}
+
+// キーボードショートカット
+document.addEventListener('keydown', e => {
+  if(e.target.tagName==='TEXTAREA') return;
+  if(e.key==='Escape'){ drawStart=null; draw(); }
+  if(e.key==='z'&&(e.ctrlKey||e.metaKey)){ undoLast(); }
+  if(e.key==='d') setMode('draw');
+  if(e.key==='s') setMode('select');
+  if(e.key==='e') setMode('erase');
+  if(e.key==='1') setRoadType('main');
+  if(e.key==='2') setRoadType('branch');
+  if(e.key==='3') setRoadType('oneway');
+  if(e.key==='4') setRoadType('railway');
+});
+
+// ===== サンプル読み込み =====
+function loadSample(){
+  segments = [
+    {x1:280,y1:0,   x2:280,y2:700, type:'main'},
+    {x1:0,  y1:340, x2:1000,y2:340,type:'main'},
+    {x1:280,y1:120, x2:500,y2:120, type:'branch'},
+    {x1:500,y1:120, x2:500,y2:340, type:'branch'},
+  ];
+  compiled=null;
+  updateSegList();
+  draw();
+}
+
+document.getElementById('status').innerHTML +=
+  ' | <a href="#" onclick="loadSample();return false" style="color:#4a8aff">サンプル読込</a>' +
+  ' | キーボード: D=描画 S=選択 E=消去 1=幹線 2=支線 3=一方通行 4=線路 Esc=キャンセル Ctrl+Z=Undo';
+
+draw();
+</script>
+</body>
+</html>
