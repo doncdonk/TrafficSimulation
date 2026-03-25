@@ -65,6 +65,8 @@ input { width:140px; }
     <option value="simple_cross_b">シンプル交差点B</option>
     <option value="simple_cross_c">シンプル交差点C</option>
     <option value="simple_cross_d">シンプル交差点D</option>
+    <option value="simple_cross_y">シンプル交差点Y</option>
+    <option value="simple_cross_z">シンプル交差点Z</option>
     <option value="crossing_a">踏切のある交差点A</option>
     <option value="crossing_b">線路のある交差点B</option>
   </select>
@@ -698,61 +700,64 @@ class Node {
       ctx.restore();
     }
 
-    // 入口エッジを4方向に分類して信号を描く
-    // 方向判定: this（交差点）から見て from がどちらにあるか
+    // 入口エッジを方向に分類して信号を描く
     const inEdgesN = edges.filter(e => e.to===this
       && e.type!=='roundabout'
       && e.from.type!=='parking'
       && !e.from.isParkingAccess
       && !e.from.isRaEntry && !e.from.isRaExit);
 
+    // 斜め道路があるか判定
+    const hasDiag = inEdgesN.some(e => {
+      const dx=Math.abs(e.from.x-this.x), dy=Math.abs(e.from.y-this.y);
+      return dx>2 && dy>2;
+    });
+
     const seen = new Set();
     for(const e of inEdgesN){
-      const dx = e.from.x - this.x;  // 交差点→from 方向
+      const dx = e.from.x - this.x;
       const dy = e.from.y - this.y;
-      const isVert = Math.abs(dy) > Math.abs(dx);
-
-      // 4方向キー（重複排除）
-      // dx,dy は「交差点→from」方向 = 車が来る方向の逆
-      // from が下(dy>0) = 車は下から来る(↑走行) = N
-      // from が上(dy<0) = 車は上から来る(↓走行) = S
-      // from が右(dx>0) = 車は右から来る(←走行) = W
-      // from が左(dx<0) = 車は左から来る(→走行) = E
-      const key = isVert ? (dy>0 ? 'N' : 'S') : (dx>0 ? 'W' : 'E');
-      if(seen.has(key)) continue;
-      seen.add(key);
+      const dist = Math.hypot(dx,dy);
+      if(dist < 1) continue;
 
       const roadW = e.lanes * LANE_W;
-      const d = padRN + 4; // 停止線手前
-      const isGreen = isVert ? vG : hG;
+      const d = padRN + 4;
 
-      // 各方向の信号位置と角度を明示的に定義
-      // 左側通行: 進行方向の左手前に信号
-      // 信号画像は angle=0 で右向き（→）
-      let sx, sy, angle;
-      if(key==='S'){
-        // 上から来る車（↓走行）: 交差点上側・右端外側、面が下向き
-        sx = this.x + roadW + 4;
-        sy = this.y - d;
-        angle = Math.PI;
-      } else if(key==='N'){
-        // 下から来る車（↑走行）: 交差点下側・左端外側、面が上向き
-        sx = this.x - roadW - 4;
-        sy = this.y + d;
-        angle = 0;
-      } else if(key==='E'){
-        // 左から来る車（→走行）: 交差点左側・上端外側、面が右向き
-        sx = this.x - d;
-        sy = this.y - roadW - 4;
-        angle = Math.PI/2;
+      let sx, sy, angle, isGreen;
+
+      if(hasDiag){
+        // 斜め対応: エッジの実際の角度で信号を配置
+        // ux,uy = 交差点→from 方向の単位ベクトル
+        const ux = dx/dist, uy = dy/dist;
+        // 左法線（進行方向の左 = 左側通行での信号側）
+        const nx = -uy, ny = ux;
+        // 信号位置: 交差点外縁(d)先 + 左法線方向(roadW+4)
+        sx = this.x + ux*d + nx*(roadW+4);
+        sy = this.y + uy*d + ny*(roadW+4);
+        // 信号の向き: 車が来る方向（from→交差点 = -ux,-uy）に面する
+        angle = Math.atan2(-uy, -ux) + Math.PI/2;
+        // 青赤判定: 縦寄り(|dy|>|dx|)→vG、横寄り→hG
+        const isVert = Math.abs(dy) > Math.abs(dx);
+        isGreen = isVert ? vG : hG;
       } else {
-        // 右から来る車（←走行）: 交差点右側・下端外側、面が左向き
-        sx = this.x + d;
-        sy = this.y + roadW + 4;
-        angle = -Math.PI/2;
+        // 通常（水平・垂直）: 従来の固定位置
+        const isVert = Math.abs(dy) > Math.abs(dx);
+        const key = isVert ? (dy>0 ? 'N' : 'S') : (dx>0 ? 'W' : 'E');
+        if(seen.has(key)) continue;
+        seen.add(key);
+        isGreen = isVert ? vG : hG;
+        if(key==='S'){
+          sx = this.x + roadW + 4; sy = this.y - d; angle = Math.PI;
+        } else if(key==='N'){
+          sx = this.x - roadW - 4; sy = this.y + d; angle = 0;
+        } else if(key==='E'){
+          sx = this.x - d; sy = this.y - roadW - 4; angle = Math.PI/2;
+        } else {
+          sx = this.x + d; sy = this.y + roadW + 4; angle = -Math.PI/2;
+        }
       }
 
-      drawSig(sx, sy, angle, isGreen, isLeftTurnPhase && isVert);
+      drawSig(sx, sy, angle, isGreen, isLeftTurnPhase && Math.abs(dy) > Math.abs(dx));
     }
   }
 }
@@ -1114,6 +1119,12 @@ class Car {
         const STOP_DIST  = 80; // 交差点まで80px以内でyield判定
 
         if(toNode.isRealCross && distToNode < YIELD_DIST){
+          // 出口方向が1つのみ（実質カーブ・直進点）はyield判定不要
+          const outEdges = edges.filter(e => e.from===toNode && e.to !== this.edge.from);
+          if(outEdges.length <= 1){
+            target = Math.min(target, this.maxSpeed * 0.6);
+            if(!this.stopReason) this.stopReason = 'カーブ通過中';
+          } else {
           target = Math.min(target, this.maxSpeed * 0.22);
           if(!this.stopReason) this.stopReason = '信号なし交差点を徐行中';
 
@@ -1157,6 +1168,7 @@ class Car {
               this.stopReason = '交差点で一時停止（譲り）';
             }
           }
+          } // end outEdges > 1
         }
         } // end isParkingAccess else
       }
@@ -2239,6 +2251,87 @@ FIXED_MAPS["simple_cross_d"] = {
     const mH2=_mkB4(108,459,'mansionH',2);  connectParkingToNearestEdge(mH2); // 左下
     const mV1=_mkB4(81,108,'mansionV',0);   connectParkingToNearestEdge(mV1); // 左上縦
     const mV2=_mkB4(918,594,'mansionV',1);  connectParkingToNearestEdge(mV2); // 右下縦
+  }
+};
+
+FIXED_MAPS["simple_cross_y"] = {
+  label: "シンプル交差点Y",
+  build(mkN, addE) {
+    const W=1000, H=700;
+
+    // ===== ノード =====
+    const ext_0 = mkN(468, 700, "cross", true);
+    const ext_9 = mkN(684,   0, "cross", true);
+
+    const n1 = mkN(468, 648, "cross", false); n1.hasSignal=true; n1.isRealCross=true;
+    const n2 = mkN(288, 468, "cross", false);
+    const n3 = mkN(288, 270, "cross", false);
+    const n4 = mkN(414, 144, "cross", false);
+    const n5 = mkN(684, 144, "cross", false); n5.hasSignal=true; n5.isRealCross=true;
+    const n6 = mkN(792, 252, "cross", false);
+    const n7 = mkN(792, 468, "cross", false);
+    const n8 = mkN(612, 648, "cross", false);
+
+    // ===== エッジ =====
+    // 外部接続
+    addE(ext_0, n1, "main"); addE(n1, ext_0, "main");
+    addE(n5, ext_9, "main"); addE(ext_9, n5, "main");
+
+    // 八角形ループ（支線）
+    addE(n1, n2, "branch"); addE(n2, n1, "branch");
+    addE(n2, n3, "branch"); addE(n3, n2, "branch");
+    addE(n3, n4, "branch"); addE(n4, n3, "branch");
+    addE(n4, n5, "branch"); addE(n5, n4, "branch");
+    addE(n5, n6, "branch"); addE(n6, n5, "branch");
+    addE(n6, n7, "branch"); addE(n7, n6, "branch");
+    addE(n7, n8, "branch"); addE(n8, n7, "branch");
+    addE(n8, n1, "branch"); addE(n1, n8, "branch");
+  }
+};
+
+FIXED_MAPS["simple_cross_z"] = {
+  label: "シンプル交差点Z",
+  build(mkN, addE) {
+    const W=1000, H=700;
+
+    // ===== ノード =====
+    const ext_0 = mkN(  0, 540, "cross", true);
+    const ext_1 = mkN(990, 540, "cross", true);
+    const ext_3 = mkN(720,   0, "cross", true);
+    const ext_9 = mkN(  0, 270, "cross", true);
+
+    const n2  = mkN(180, 540, "cross", false); n2.hasSignal=true;  n2.isRealCross=true;
+    const n4  = mkN(720, 360, "cross", false);
+    const n5  = mkN(540, 540, "cross", false); n5.hasSignal=true;  n5.isRealCross=true;
+    const n6  = mkN(900, 540, "cross", false); n6.hasSignal=true;  n6.isRealCross=true;
+    const n7  = mkN(630, 450, "cross", false); n7.hasSignal=true;  n7.isRealCross=true;
+    const n8  = mkN(450, 270, "cross", false); n8.hasSignal=true;  n8.isRealCross=true;
+    const n10 = mkN(630,  90, "cross", false); n10.hasSignal=true; n10.isRealCross=true;
+    const n11 = mkN(828,  90, "cross", false);
+
+    // ===== エッジ =====
+    // 幹線横（y=540）
+    addE(ext_0, n2,  "main"); addE(n2,  ext_0, "main");
+    addE(n2,    n5,  "main"); addE(n5,  n2,    "main");
+    addE(n5,    n6,  "main"); addE(n6,  n5,    "main");
+    addE(n6,    ext_1,"main");addE(ext_1,n6,   "main");
+
+    // 幹線斜め（n2→n8→n10→ext_3）
+    addE(n2,  n8,   "main"); addE(n8,  n2,   "main");
+    addE(n8,  n10,  "main"); addE(n10, n8,   "main");
+    addE(n10, ext_3,"main"); addE(ext_3,n10, "main");
+
+    // 支線（n4→n7→n5、n4→n6）
+    addE(n4, n7, "branch"); addE(n7, n4, "branch");
+    addE(n7, n5, "branch"); addE(n5, n7, "branch");
+    addE(n4, n6, "branch"); addE(n6, n4, "branch");
+
+    // 支線（n8→ext_9）
+    addE(n8, ext_9, "branch"); addE(ext_9, n8, "branch");
+
+    // 一方通行
+    addE(n7,  n8,  "oneway");
+    addE(n10, n11, "oneway");
   }
 };
 
@@ -3911,6 +4004,12 @@ function updateScore(jamCount){
   document.getElementById("budgetVal").textContent=Math.floor(budget).toLocaleString()+'pt';
   document.getElementById("bonusVal").textContent=`BONUS ×${scoreBonus.toFixed(1)}`;
   document.getElementById("accVal").textContent=accidentCount;
+
+  // ===== 出口番号の割り当て =====
+  // external=trueのノードをx座標→y座標順に並べて番号を振る
+  const exitNodes = nodes.filter(n => n.external && n.type === "cross");
+  exitNodes.sort((a,b) => a.x===b.x ? a.y-b.y : a.x-b.x);
+  exitNodes.forEach((n,i) => { n.exitNumber = i+1; });
 }
 
 // ===== 事故発生 =====
@@ -4445,6 +4544,23 @@ canvas.addEventListener("click", ev=>{
       selectedNode=n;
       openSignalPanel(n, ev.pageX, ev.pageY);
       break;
+    }
+  }
+
+  // 出口ノードのクリック: 出口情報を表示
+  if(!operationMode){
+    const exitNode = nodes.find(n =>
+      n.external && n.exitNumber !== undefined &&
+      Math.hypot(n.x-mx, n.y-my) < 16
+    );
+    if(exitNode){
+      // この出口に向かっている車の数を数える
+      const heading = cars.filter(c => {
+        if(!c.alive) return false;
+        const dest = c.route.length > 0 ? c.route[c.route.length-1].edge.to : null;
+        return dest === exitNode;
+      }).length;
+      showToast(`🚪 出口${exitNode.exitNumber}  向かっている車: ${heading}台`);
     }
   }
 }); // canvas click end
@@ -5144,11 +5260,13 @@ function updateCarProfileBody(car, body){
     ? car.route[car.route.length-1].edge.to
     : null;
   // car.destLabel が明示設定されていればそちらを優先
+  const exitNum = destNode && destNode.external && destNode.exitNumber
+    ? ` (出口${destNode.exitNumber})` : '';
   const destLabel = car.destLabel
     ? car.destLabel
     : destNode
       ? (destNode.type==='parking' ? '🅿 駐車場' :
-         destNode.external ? '🚪 出口' :
+         destNode.external ? `🚪 出口${destNode.exitNumber || ''}` :
          destNode.type==='cross' ? '🔀 交差点（経由地）' :
          destNode.type)
       : '不明';
@@ -5470,10 +5588,17 @@ function spawnCar(){
   }
 
   // 通常: 外部ノード→外部ノード（駐車場以外）
+  // ランダムに1つ選んでルートを試す（全候補一括渡しだと近い出口ばかり選ばれる）
   const extOnly = nodes.filter(n => n.external && n.type !== "parking" && n !== start);
-  const route = generateRouteBFS(start, extOnly.length>0 ? extOnly : spawnNodes);
-  if(!route || route.length === 0) return;
-  cars.push(new Car(route, img));
+  if(extOnly.length === 0) return;
+  const shuffled = [...extOnly].sort(() => Math.random() - 0.5);
+  for(const goal of shuffled){
+    const route = generateRouteBFS(start, [goal]);
+    if(route && route.length > 0){
+      cars.push(new Car(route, img));
+      return;
+    }
+  }
 }
 
 // ===== 時間更新 =====
@@ -5680,21 +5805,37 @@ function drawDirectionSigns(){
 }
 
 function drawIntersectionPads(){
+
+  // ===== 凸包ユーティリティ（斜め交差点用）=====
+  function convexHull(pts){
+    if(pts.length < 3) return pts;
+    pts = pts.slice().sort((a,b) => a.x===b.x ? a.y-b.y : a.x-b.x);
+    const cross = (o,a,b) => (a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x);
+    const lower=[], upper=[];
+    for(const p of pts){ while(lower.length>=2 && cross(lower[lower.length-2],lower[lower.length-1],p)<=0) lower.pop(); lower.push(p); }
+    for(let i=pts.length-1;i>=0;i--){ const p=pts[i]; while(upper.length>=2 && cross(upper[upper.length-2],upper[upper.length-1],p)<=0) upper.pop(); upper.push(p); }
+    upper.pop(); lower.pop();
+    return lower.concat(upper);
+  }
+
+  function hasDiagonalEdge(connEdges){
+    return connEdges.some(e => {
+      const dx=Math.abs(e.to.x-e.from.x), dy=Math.abs(e.to.y-e.from.y);
+      return dx>2 && dy>2;
+    });
+  }
+
   for(const n of nodes){
 
     // ===== bend ノード（直角カーブの折れ点）=====
-    // 2本のエッジが直角に交わる角を、道路幅の正方形で埋めて隙間をなくす
     if(n.type === "bend"){
       const connB = edges.filter(e => e.from===n || e.to===n);
       if(connB.length === 0) continue;
       const allOneway = connB.every(e => e.type === 'oneway');
       const bW = allOneway ? LANE_W / 2 : Math.max(...connB.map(e => e.lanes * LANE_W));
-
       ctx.save();
-      // ベース色（onewayは専用色）
       ctx.fillStyle = allOneway ? "#4a4a5a" : "#555";
       ctx.fillRect(n.x - bW, n.y - bW, bW*2, bW*2);
-      // kousatenImg テクスチャでタイリング
       if(kousatenImg.complete && kousatenImg.naturalWidth > 0){
         ctx.save();
         ctx.beginPath();
@@ -5711,11 +5852,10 @@ function drawIntersectionPads(){
     }
 
     if(n.type!=="cross" || n.external) continue;
-    if(n.isRaEntry || n.isRaExit) continue; // RA外縁点は描画しない
-    if(n.isParkingAccess) continue;          // 駐車場アクセスノードは描画しない
-    if(n.isCrossing) continue;               // 踏切ノードは描画しない
+    if(n.isRaEntry || n.isRaExit) continue;
+    if(n.isParkingAccess) continue;
+    if(n.isCrossing) continue;
 
-    // RA中心ノードは直接接続エッジが0本でも描画する（installRoundaboutで構造変更済み）
     if(n.isRoundabout && n.rbHalfSize){
       const rbReady2 = roundaboutImg.complete && roundaboutImg.naturalWidth > 0;
       if(rbReady2){
@@ -5725,7 +5865,7 @@ function drawIntersectionPads(){
         ctx.fillStyle="#888";    ctx.beginPath(); ctx.arc(n.x,n.y,n.rbHalfSize,0,Math.PI*2); ctx.fill();
         ctx.fillStyle="#4a7a4a"; ctx.beginPath(); ctx.arc(n.x,n.y,n.rbHalfSize*0.31*2,0,Math.PI*2); ctx.fill();
       }
-      continue; // 他の描画はスキップ
+      continue;
     }
 
     const connEdges = edges.filter(e => e.from===n || e.to===n);
@@ -5734,7 +5874,6 @@ function drawIntersectionPads(){
     const maxW = Math.max(...connEdges.map(e => e.lanes * LANE_W));
     const padSize = maxW * 2;
 
-    // ===== ラウンドアバウト（ランダム生成時・旧方式）=====
     if(n.isRoundabout){
       const rbSize = Math.max(padSize * 1.7, 90);
       n.rbHalfSize   = rbSize / 2;
@@ -5753,33 +5892,83 @@ function drawIntersectionPads(){
     // ===== 動的交差点描画 =====
     const inEdges = connEdges.filter(e => e.to === n);
     const padR = maxW;
+    const isDiag = hasDiagonalEdge(connEdges);
+
+    // 各エッジのノードから見た方向を計算
+    function edgeDir(e){
+      let ox, oy;
+      if(e.from === n){ ox = e.to.x - n.x; oy = e.to.y - n.y; }
+      else             { ox = e.from.x - n.x; oy = e.from.y - n.y; }
+      const d = Math.hypot(ox,oy);
+      if(d < 1) return null;
+      return {ux:ox/d, uy:oy/d, rw:e.lanes*LANE_W};
+    }
+
+    // 各エッジ方向でのパッド外縁距離（凸包境界までの距離）
+    // 斜め交差点では角度に応じてトリム量が増えるのでそれと合わせる
+    function edgePadDist(dir){
+      if(!isDiag) return padR;
+      // このエッジ方向と他エッジとの最小交差角のsin
+      let minSin = 1.0;
+      for(const e2 of connEdges){
+        const d2 = edgeDir(e2);
+        if(!d2) continue;
+        const sinA = Math.abs(dir.ux*d2.uy - dir.uy*d2.ux);
+        if(sinA < 0.1) continue;
+        if(sinA < minSin) minSin = sinA;
+      }
+      if(minSin > 0.99) return padR;
+      if(minSin < 0.3) minSin = 0.3;
+      return Math.min(padR / minSin, padR * 2.5);
+    }
 
     ctx.save();
     ctx.translate(n.x, n.y);
 
-    // ------1. アスファルト地（道路テクスチャと同じ見た目に）------
-    // 道路と全く同じ手順: ベース色 → テクスチャタイリング
-    const cornerR = Math.max(4, padR * 0.18);
-
-    // クリップ領域を設定（角丸矩形に収める）
+    // ------1. アスファルト地------
     ctx.save();
-    ctx.beginPath();
-    ctx.roundRect(-padR, -padR, padR*2, padR*2, cornerR);
-    ctx.clip();
 
-    // ベース色（道路と同じ）
+    if(isDiag){
+      // 斜め道路あり: 角度考慮した距離で凸包ポリゴンを生成
+      const pts = [{x:0,y:0}];
+      for(const e of connEdges){
+        const dir = edgeDir(e);
+        if(!dir) continue;
+        const epd = edgePadDist(dir);
+        const nx2 = -dir.uy, ny2 = dir.ux;
+        pts.push({x: dir.ux*epd + nx2*dir.rw, y: dir.uy*epd + ny2*dir.rw});
+        pts.push({x: dir.ux*epd - nx2*dir.rw, y: dir.uy*epd - ny2*dir.rw});
+      }
+      const hull = convexHull(pts);
+      if(hull.length >= 3){
+        ctx.beginPath();
+        ctx.moveTo(hull[0].x, hull[0].y);
+        for(let i=1;i<hull.length;i++) ctx.lineTo(hull[i].x, hull[i].y);
+        ctx.closePath();
+        ctx.clip();
+      } else {
+        const cornerR = Math.max(4, padR * 0.18);
+        ctx.beginPath();
+        ctx.roundRect(-padR, -padR, padR*2, padR*2, cornerR);
+        ctx.clip();
+      }
+    } else {
+      // 通常（水平・垂直のみ）: 従来の角丸矩形
+      const cornerR = Math.max(4, padR * 0.18);
+      ctx.beginPath();
+      ctx.roundRect(-padR, -padR, padR*2, padR*2, cornerR);
+      ctx.clip();
+    }
+
     ctx.fillStyle = "#555";
-    ctx.fillRect(-padR, -padR, padR*2, padR*2);
+    ctx.fillRect(-padR*3, -padR*3, padR*6, padR*6); // 凸包に合わせて広めに塗る
 
-    // kousaten.png テクスチャをタイリング（専用アスファルトテクスチャ）
     if(kousatenImg.complete && kousatenImg.naturalWidth > 0){
       const tileW = kousatenImg.naturalWidth;
       const tileH = kousatenImg.naturalHeight;
-      for(let tx = -padR; tx < padR; tx += tileW){
-        for(let ty = -padR; ty < padR; ty += tileH){
+      for(let tx = -padR*3; tx < padR*3; tx += tileW)
+        for(let ty = -padR*3; ty < padR*3; ty += tileH)
           ctx.drawImage(kousatenImg, tx, ty, tileW, tileH);
-        }
-      }
     }
     ctx.restore(); // clip 解除
 
@@ -5789,24 +5978,21 @@ function drawIntersectionPads(){
       const dy = e.from.y - n.y;
       const dist = Math.hypot(dx, dy);
       if(dist < 1) continue;
-      const ux = dx / dist, uy = dy / dist;  // 交差点中心 → 入口方向
-      const perpX = -uy, perpY = ux;          // 法線（道路幅方向）
+      const ux = dx / dist, uy = dy / dist;
+      const perpX = -uy, perpY = ux;
       const roadW = e.lanes * LANE_W;
 
-      // ---- 横断歩道 ----
-      // 対向エッジのroadWを加算して実際の道路全幅をカバーする
-      // main道路: 往路エッジ(to=n) + 復路エッジ(from=n,to=e.from) で両側レーン分
-      const oppositeEdge = connEdges.find(
-        e2 => e2.from === n && e2.to === e.from
-      );
+      const oppositeEdge = connEdges.find(e2 => e2.from === n && e2.to === e.from);
       const totalRoadW = roadW + (oppositeEdge ? oppositeEdge.lanes * LANE_W : 0);
 
-      const cwStart  = padR + 3;  // 横断歩道の内端（交差点外縁から3px外）
-      const cwWidth  = 10;        // 横断歩道の奥行き（道路方向）
-      const stripeW  = 3;         // 縞1本の幅
-      const stripeGap = 3;        // 縞の間隔
+      // 横断歩道の開始位置: このエッジ方向での実際のパッド外縁距離に合わせる
+      const dir = edgeDir(e);
+      const epd = dir ? edgePadDist(dir) : padR;
+      const cwStart  = epd + 3;
+      const cwWidth  = 10;
+      const stripeW  = 3;
+      const stripeGap = 3;
       const stripeCount = Math.max(3, Math.floor(totalRoadW / (stripeW + stripeGap)));
-      // 縞を合計道路幅の中央に揃える
       const totalStripeW = stripeCount * stripeW + (stripeCount - 1) * stripeGap;
       const stripeOffStart = -totalRoadW / 2 + (totalRoadW - totalStripeW) / 2;
 
@@ -5830,11 +6016,9 @@ function drawIntersectionPads(){
       ctx.restore();
 
       // ---- 停止線 ----
-      // 合計道路幅で描く（往路・復路の合計幅）
-      const stopDist = padR + 1;
+      const stopDist = epd + 1;
       const sx = ux * stopDist, sy = uy * stopDist;
       const halfTotalW = totalRoadW / 2;
-
       ctx.strokeStyle = "rgba(255,255,255,0.90)";
       ctx.lineWidth   = 2.2;
       ctx.lineCap     = "butt";
@@ -5844,7 +6028,7 @@ function drawIntersectionPads(){
       ctx.stroke();
     }
 
-    ctx.restore();
+    ctx.restore(); // translate 解除
   }
 
   // ===== bend ノードのコーナーフィル =====
@@ -5937,21 +6121,50 @@ function drawRoad(e){
   const roadW=e.lanes*LANE_W;
   const isInternalCross = n => n.type==="cross" && !n.external;
   function padRadius(n){
-    // oneway専用bendノード: 道路幅分トリムしてパッドと合わせる
+    // oneway専用bendノード
     if(n.type === 'bend'){
       const connB = edges.filter(e2 => e2.from===n || e2.to===n);
       const allOneway = connB.every(e2 => e2.type === 'oneway');
       return allOneway ? LANE_W / 2 : 0;
     }
     if(!isInternalCross(n)) return 0;
-    // RA外縁点・駐車場アクセスノードはトリムなし
     if(n.isRaEntry || n.isRaExit) return 0;
     if(n.isParkingAccess) return 0;
-    if(n.isCrossing) return 0;              // 踏切ノードはトリムなし
-    // ラウンドアバウトは実サイズの半径でトリムする
+    if(n.isCrossing) return 0;
     if(n.isRoundabout && n.rbHalfSize) return n.rbHalfSize;
     const conn = edges.filter(e2 => e2.from===n || e2.to===n);
-    return conn.length > 0 ? Math.max(...conn.map(e2 => e2.lanes * LANE_W)) : 0;
+    if(conn.length === 0) return 0;
+    const baseR = Math.max(...conn.map(e2 => e2.lanes * LANE_W));
+
+    // 斜めエッジが存在する場合のみ角度考慮トリムを適用
+    const hasDiag = conn.some(e2 => {
+      const adx = Math.abs(e2.to.x - e2.from.x);
+      const ady = Math.abs(e2.to.y - e2.from.y);
+      return adx > 2 && ady > 2;
+    });
+    if(!hasDiag) return baseR; // 水平・垂直のみ → 従来通り
+
+    // このエッジの方向
+    const eDx = e.to.x - e.from.x, eDy = e.to.y - e.from.y;
+    const eLen = Math.hypot(eDx, eDy);
+    if(eLen < 1) return baseR;
+    const eUx = eDx/eLen, eUy = eDy/eLen;
+
+    let minSin = 1.0;
+    for(const e2 of conn){
+      if(e2 === e) continue;
+      const dx2 = e2.to.x - e2.from.x, dy2 = e2.to.y - e2.from.y;
+      const len2 = Math.hypot(dx2, dy2);
+      if(len2 < 1) continue;
+      const ux2 = dx2/len2, uy2 = dy2/len2;
+      const sinA = Math.abs(eUx*uy2 - eUy*ux2);
+      if(sinA < 0.1) continue; // 平行エッジ（往復）は除外
+      if(sinA < minSin) minSin = sinA;
+    }
+    if(minSin > 0.99) return baseR; // 直交のみ → 従来通り
+    if(minSin < 0.3) minSin = 0.3;
+    const angularR = Math.min(baseR / minSin, baseR * 2.5);
+    return Math.max(baseR, angularR);
   }
 
   const dx=e.to.x-e.from.x, dy=e.to.y-e.from.y;
@@ -6294,6 +6507,27 @@ function drawRivers(){
 }
 
 // ===== 地形描画 =====
+function drawExitNumbers(){
+  for(const n of nodes){
+    if(!n.external || n.exitNumber === undefined) continue;
+    const r = 10;
+    ctx.save();
+    ctx.fillStyle = 'rgba(20,20,40,0.82)';
+    ctx.strokeStyle = '#aaddff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(n.exitNumber, n.x, n.y);
+    ctx.restore();
+  }
+}
+
 function drawTerrain(){
   if(terrainCanvas){
     ctx.drawImage(terrainCanvas, 0, 0);
@@ -7099,6 +7333,7 @@ function loop(){
   drawAccidents();
   drawReverseHighlight();
   nodes.forEach(n=>n.draw());
+  drawExitNumbers();
   drawDebugGrid();
   // 一時停止インジケーター
   if(gamePaused){

@@ -62,6 +62,7 @@ button.action.success{background:#1a4a2a;border-color:#4aaa6a;color:#afa}
     <button class="tool-btn" id="type-railway" onclick="setRoadType('railway')" style="border-color:#7a5035">線路</button>
   </div>
   <span style="color:#444">|</span>
+  <button class="tool-btn" id="btn-diagonal" onclick="toggleDiagonal()" title="斜め線を許可（45°スナップ）">斜め↗</button>
   <button class="tool-btn" onclick="undoLast()">↩ Undo</button>
   <button class="tool-btn danger" onclick="clearAll()">🗑 全消去</button>
   <span style="color:#444">|</span>
@@ -130,6 +131,7 @@ let drawStart = null; // 描画中の始点
 let mousePos = {x:0, y:0};
 let selectedSeg = -1;
 let hoveredSeg = -1;
+let diagonalMode = false; // 斜め線モード
 
 // 色定義
 const COLORS = {
@@ -144,6 +146,19 @@ const GRID_COL_MAJOR = 'rgba(0,200,80,0.45)';
 
 function snap(v){ return Math.round(v/GRID)*GRID; }
 function snapPt(x,y,noSnap){ return noSnap ? {x,y} : {x:snap(x),y:snap(y)}; }
+// 斜め45°スナップ: 始点から見て最も近い8方向（水平・垂直・45°）にスナップ
+function snapDiagonal(x,y,from){
+  if(!from) return {x:snap(x),y:snap(y)};
+  const dx=x-from.x, dy=y-from.y;
+  const dist=Math.hypot(dx,dy);
+  if(dist<1) return {x:snap(x),y:snap(y)};
+  const angle=Math.atan2(dy,dx);
+  // 8方向に丸める（45°刻み）
+  const snap8=Math.round(angle/(Math.PI/4))*(Math.PI/4);
+  const snappedX=from.x+Math.round(Math.cos(snap8)*dist/GRID)*GRID;
+  const snappedY=from.y+Math.round(Math.sin(snap8)*dist/GRID)*GRID;
+  return {x:snappedX, y:snappedY};
+}
 function ptEq(a,b){ return a.x===b.x && a.y===b.y; }
 function segLen(s){ return Math.hypot(s.x2-s.x1, s.y2-s.y1); }
 function isHorz(s){ return Math.abs(s.y2-s.y1) < Math.abs(s.x2-s.x1); }
@@ -276,7 +291,11 @@ function findSegAt(px,py){
 }
 
 canvas.addEventListener('mousemove', e => {
-  const {x,y} = getPos(e);
+  let {x,y} = getPos(e);
+  if(diagonalMode && mode==='draw' && drawStart && !e.shiftKey){
+    const snapped = snapDiagonal(x,y,drawStart);
+    x=snapped.x; y=snapped.y;
+  }
   mousePos = {x,y};
   if(mode==='select'||mode==='erase') hoveredSeg = findSegAt(x,y);
   else hoveredSeg = -1;
@@ -285,7 +304,11 @@ canvas.addEventListener('mousemove', e => {
 });
 
 canvas.addEventListener('click', e => {
-  const {x,y} = getPos(e);
+  let {x,y} = getPos(e);
+  if(diagonalMode && mode==='draw' && drawStart && !e.shiftKey){
+    const snapped = snapDiagonal(x,y,drawStart);
+    x=snapped.x; y=snapped.y;
+  }
   if(mode==='draw'){
     if(!drawStart){
       drawStart = {x,y};
@@ -321,9 +344,8 @@ canvas.addEventListener('dblclick', e => {
 
 // ===== セグメント操作 =====
 function addSegment(x1,y1,x2,y2,type){
-  // 水平または垂直に正規化（斜め線は警告）
-  if(x1!==x2 && y1!==y2){
-    // 斜め → 水平か垂直かを選ぶ（距離が大きい方）
+  if(!diagonalMode && x1!==x2 && y1!==y2){
+    // 通常モード: 水平か垂直に強制
     if(Math.abs(x2-x1) >= Math.abs(y2-y1)) y2=y1;
     else x2=x1;
   }
@@ -396,20 +418,20 @@ function compileMap(){
     addPt(s.x2,s.y2,extB);
   });
 
-  // 線分同士の交点計算
+  // 線分同士の交点計算（任意角度対応）
   function segIntersect(a,b){
-    // 水平+垂直のみ想定
-    if(a.x1===a.x2 && b.y1===b.y2){ // aが縦, bが横
-      const x=a.x1, y=b.y1;
-      if(Math.min(a.y1,a.y2)<=y && y<=Math.max(a.y1,a.y2) &&
-         Math.min(b.x1,b.x2)<=x && x<=Math.max(b.x1,b.x2))
-        return {x,y};
-    }
-    if(a.y1===a.y2 && b.x1===b.x2){ // aが横, bが縦
-      const x=b.x1, y=a.y1;
-      if(Math.min(a.x1,a.x2)<=x && x<=Math.max(a.x1,a.x2) &&
-         Math.min(b.y1,b.y2)<=y && y<=Math.max(b.y1,b.y2))
-        return {x,y};
+    // 汎用線分交点（パラメトリック法）
+    const dx1=a.x2-a.x1, dy1=a.y2-a.y1;
+    const dx2=b.x2-b.x1, dy2=b.y2-b.y1;
+    const denom = dx1*dy2 - dy1*dx2;
+    if(Math.abs(denom)<0.001) return null; // 平行
+    const t = ((b.x1-a.x1)*dy2 - (b.y1-a.y1)*dx2) / denom;
+    const u = ((b.x1-a.x1)*dy1 - (b.y1-a.y1)*dx1) / denom;
+    if(t>0.001 && t<0.999 && u>0.001 && u<0.999){
+      return {
+        x: Math.round(a.x1+dx1*t),
+        y: Math.round(a.y1+dy1*t)
+      };
     }
     return null;
   }
@@ -432,16 +454,21 @@ function compileMap(){
 
   // 各道路セグメントを交点ノードで分割してエッジ追加
   roadSegs.forEach(s => {
-    // このセグメント上に乗っているノードを並べる
+    // このセグメント上に乗っているノードを並べる（斜め線対応）
+    const segLen = Math.hypot(s.x2-s.x1, s.y2-s.y1);
     const onSeg = nodes.filter(n => {
-      if(s.x1===s.x2) return n.x===s.x1 && n.y>=Math.min(s.y1,s.y2) && n.y<=Math.max(s.y1,s.y2);
-      if(s.y1===s.y2) return n.y===s.y1 && n.x>=Math.min(s.x1,s.x2) && n.x<=Math.max(s.x1,s.x2);
-      return false;
-    }).sort((a,b) => s.x1===s.x2 ? a.y-b.y : a.x-b.x);
-
-    if(s.x1>s.x2||s.y1>s.y2){
-      onSeg.reverse();
-    }
+      if(segLen<1) return false;
+      // 点がセグメント上にあるか: 外積≒0 && 内積が[0,segLen]内
+      const cross = (n.x-s.x1)*(s.y2-s.y1) - (n.y-s.y1)*(s.x2-s.x1);
+      if(Math.abs(cross) > segLen*1.5) return false; // 許容誤差1.5px
+      const dot = (n.x-s.x1)*(s.x2-s.x1) + (n.y-s.y1)*(s.y2-s.y1);
+      return dot >= -1 && dot <= segLen*segLen+1;
+    }).sort((a,b) => {
+      // セグメント方向に沿って並べる
+      const da = (a.x-s.x1)*(s.x2-s.x1) + (a.y-s.y1)*(s.y2-s.y1);
+      const db = (b.x-s.x1)*(s.x2-s.x1) + (b.y-s.y1)*(s.y2-s.y1);
+      return da-db;
+    });
 
     for(let i=0;i<onSeg.length-1;i++){
       const a=onSeg[i], b=onSeg[i+1];
@@ -567,6 +594,18 @@ function setMode(m){
   document.getElementById('mode-'+m).classList.add('active');
   canvas.style.cursor = m==='draw'?'crosshair':m==='erase'?'cell':'default';
   draw();
+}
+
+function toggleDiagonal(){
+  diagonalMode = !diagonalMode;
+  const btn = document.getElementById('btn-diagonal');
+  btn.style.background = diagonalMode ? '#2a6a2a' : '#222';
+  btn.style.color = diagonalMode ? '#8fff8f' : '#ccc';
+  btn.style.borderColor = diagonalMode ? '#4fc04f' : '#555';
+  document.getElementById('status').innerHTML =
+    diagonalMode
+    ? 'グリッド: 18px | <b style="color:#8fff8f">斜めモードON（8方向スナップ）</b> | Shift: スナップOFF'
+    : 'グリッド: 18px (1車線) | キャンバス: 1000×700 | Shift+クリック: グリッドスナップOFF';
 }
 
 function setRoadType(t){
