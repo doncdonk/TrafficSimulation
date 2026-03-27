@@ -71,6 +71,8 @@ input { width:140px; }
     <option value="asym_test2">非対称道路テスト2</option>
     <option value="crossing_a">踏切のある交差点A</option>
     <option value="crossing_b">線路のある交差点B</option>
+    <option disabled>── Lサイズ（2×）──</option>
+    <option value="large_cross_d">Lサイズ交差点A</option>
   </select>
   <button onclick="generateCity()" style="background:#444;color:#fff;border:1px solid #666;padding:2px 8px;cursor:pointer;font-size:12px">▶ 生成</button>
   |
@@ -89,6 +91,9 @@ input { width:140px; }
   | <button id="btnHeatmap" onclick="toggleHeatmap()" style="background:#333;color:#ccc;border:1px solid #555;padding:2px 8px;cursor:pointer;font-size:12px">🌡 渋滞マップ</button>
   | <button id="btnDebugGrid" onclick="toggleDebugGrid()" style="background:#333;color:#888;border:1px solid #555;padding:2px 8px;cursor:pointer;font-size:12px">🔲 グリッド</button>
   | 緊急対応(-300pt): <button id="clearAccBtn" onclick="clearAccident()">🚨 対応</button>
+  | <button onclick="setCamZoom(camZoom*1.25)" style="background:#333;color:#ccc;border:1px solid #555;padding:2px 6px;cursor:pointer;font-size:13px" title="ズームイン">＋</button>
+  <button onclick="setCamZoom(camZoom*0.8)" style="background:#333;color:#ccc;border:1px solid #555;padding:2px 6px;cursor:pointer;font-size:13px" title="ズームアウト">－</button>
+  <button onclick="resetCam()" style="background:#333;color:#ccc;border:1px solid #555;padding:2px 6px;cursor:pointer;font-size:11px" title="ズームリセット" id="btnZoomReset">🔍<span id="zoomLabel">×1.0</span></button>
 </div>
 <div id="signalTimingPanel" style="
   display:none; position:fixed; z-index:9000;
@@ -193,6 +198,36 @@ let gameSpeed  = 1; // 1,2,4
 let signEditEdge = null;    // サイン変更対象エッジ（選択中）
 let selectedCar = null;     // プロフィール表示対象の車
 
+// ===== カメラ（ズーム・パン）=====
+let camZoom = 1.0;          // ズーム倍率（0.25〜4.0）
+let camX    = 0;            // パン X オフセット（canvas座標系）
+let camY    = 0;            // パン Y オフセット（canvas座標系）
+let _isPanning = false;     // 中ボタン/右ドラッグでパン中フラグ
+let _panStartX = 0, _panStartY = 0; // パン開始時のマウス位置
+let _panStartCamX = 0, _panStartCamY = 0; // パン開始時のカメラ位置
+
+// クライアント座標 → ワールド座標（ゲーム内座標）への変換
+function clientToWorld(clientX, clientY){
+  const r = canvas.getBoundingClientRect();
+  const cx = (clientX - r.left) * (canvas.width  / r.width);
+  const cy = (clientY - r.top)  * (canvas.height / r.height);
+  return {
+    x: (cx - camX) / camZoom,
+    y: (cy - camY) / camZoom,
+  };
+}
+
+// ワールド座標 → クライアント座標への変換（ポップアップ表示位置用）
+function worldToClient(wx, wy){
+  const r = canvas.getBoundingClientRect();
+  const cx = wx * camZoom + camX;
+  const cy = wy * camZoom + camY;
+  return {
+    x: r.left + cx * (r.width  / canvas.width),
+    y: r.top  + cy * (r.height / canvas.height),
+  };
+}
+
 // ===== スコア・事故 =====
 let score = 0;
 let scoreBonus = 1.0;     // 渋滞ゼロ継続でボーナス倍率UP
@@ -206,6 +241,8 @@ const ACCIDENT_SLOWZONE = 80;   // 事故影響範囲（px）
 const MIN_GAP  = 20;   // 前車との最小距離(px)
 const SLOW_GAP = 60;   // 減速開始距離(px)
 const LANE_W   = 18;   // 1車線の幅(px)
+let MAP_W    = 1000; // マップ幅(px) ※マップ切替時に変更される
+let MAP_H    = 700;  // マップ高さ(px) ※マップ切替時に変更される
 
 // ===== 鉄道システム =====
 // railways: [{
@@ -3033,6 +3070,138 @@ FIXED_MAPS["crossing_b"] = {
   }
 };
 
+// ================================================================
+// Lサイズ交差点A（simple_cross_d の 2× スケール版、2000×1400）
+// ================================================================
+FIXED_MAPS["large_cross_d"] = {
+  label: "Lサイズ交差点A",
+  build(mkN, addE) {
+    const W = 2000, H = 1400;
+
+    // simple_cross_d を完全2倍スケール
+    // 左主線 x=640, 右主線 x=1360
+    // 交差点Y座標: cLT=350, cLB=700, cRT=700, cRB=1050
+
+    // ===== 主交差点ノード =====
+    const cLT = mkN(640,  350, "cross", false); cLT.hasSignal=true; cLT.isRealCross=true;
+    const cLB = mkN(640,  700, "cross", false); cLB.hasSignal=true; cLB.isRealCross=true;
+    const cRT = mkN(1360, 700, "cross", false); cRT.hasSignal=true; cRT.isRealCross=true;
+    const cRB = mkN(1360,1050, "cross", false); cRB.hasSignal=true; cRB.isRealCross=true;
+
+    // ===== 外部ノード =====
+    const vTL = mkN( 640,   0, "cross", true);
+    const vBL = mkN( 640,1400, "cross", true);
+    const vTR = mkN(1360,   0, "cross", true);
+    const vBR = mkN(1360,1400, "cross", true);
+
+    // ===== 左主線 =====
+    for(const [a,b] of [[vTL,cLT],[cLT,cLB],[cLB,vBL]]){
+      addE(a,b,"main"); addE(b,a,"main");
+    }
+    // ===== 右主線 =====
+    for(const [a,b] of [[vTR,cRT],[cRT,cRB],[cRB,vBR]]){
+      addE(a,b,"main"); addE(b,a,"main");
+    }
+    // ===== 水平支線 =====
+    addE(cLB,cRT,"branch"); addE(cRT,cLB,"branch");
+
+    // ===== 左コの字支線 =====
+    const bLT = mkN(240, 350,"bend",false);
+    const bLB = mkN(240, 700,"bend",false);
+    addE(cLT,bLT,"branch"); addE(bLT,cLT,"branch");
+    addE(bLB,cLB,"branch"); addE(cLB,bLB,"branch");
+
+    // 左駐車場（左コの字内側）
+    const pL = mkN(400, 525,"parking",false,null);
+    pL.isLarge=true; pL.capacity=48;
+    pL.parkedCars=[]; pL.slotUsed=new Array(48).fill(false);
+    const accL = mkN(240,525,"cross",false);
+    accL.hasSignal=false; accL.isRealCross=false; accL.isParkingAccess=true;
+    addE(bLT,accL,"branch"); addE(accL,bLT,"branch");
+    addE(accL,bLB,"branch"); addE(bLB,accL,"branch");
+    addE(accL,pL,"branch");  addE(pL,accL,"branch");
+
+    // ===== 右コの字支線 =====
+    const bRT = mkN(1760, 700,"bend",false);
+    const bRB = mkN(1760,1050,"bend",false);
+    addE(cRT,bRT,"branch"); addE(bRT,cRT,"branch");
+    addE(bRB,cRB,"branch"); addE(cRB,bRB,"branch");
+
+    // 右駐車場（右コの字内側）
+    const pR = mkN(1600, 875,"parking",false,null);
+    pR.isLarge=true; pR.capacity=48;
+    pR.parkedCars=[]; pR.slotUsed=new Array(48).fill(false);
+    const accR = mkN(1760,875,"cross",false);
+    accR.hasSignal=false; accR.isRealCross=false; accR.isParkingAccess=true;
+    addE(bRT,accR,"branch"); addE(accR,bRT,"branch");
+    addE(accR,bRB,"branch"); addE(bRB,accR,"branch");
+    addE(accR,pR,"branch");  addE(pR,accR,"branch");
+
+    // ===== 建物（2倍スケール・密度調整済み）=====
+    const _gC=['#7ab040','#8ab848','#6aa030','#80b038'];
+    const _cC=['#4a7ab0','#c84040','#40a848','#e0a030','#8848c0'];
+    const _mkH=(hx,hy,i)=>{
+      const n=mkN(hx,hy,"parking",false,null);
+      n.houseType='sparse';n.capacity=1;n.parkedCars=[];n.slotUsed=[false];
+      n.housePattern=i%5;n.houseRoofColor=i%4;n.houseGardenColor=_gC[i%4];
+      n.hasCar=i%2===0;n.carColor=_cC[i%5];return n;
+    };
+    const _mkB=(hx,hy,type,color)=>{
+      const n=mkN(hx,hy,"parking",false,null);
+      n.houseType=type;n.buildingColor=color;
+      n.capacity=type==='mansionH'?6:type==='mansionV'?4:0;
+      n.parkedCars=[];n.slotUsed=new Array(n.capacity).fill(false);return n;
+    };
+    let _i=0;
+
+    // 格子状に配置し、道路近傍はisSafe()でフィルタ
+    function isSafe(hx,hy){
+      const M=54;
+      // 左主線x=640
+      if(hx>=640-M && hx<=640+M) return false;
+      // 右主線x=1360
+      if(hx>=1360-M && hx<=1360+M) return false;
+      // 水平支線y=700 (cLB〜cRT)
+      if(hy>=700-M && hy<=700+M && hx>=640-M && hx<=1360+M) return false;
+      // 左コの字縦 x=240
+      if(hx>=240-M && hx<=240+M && hy>=350-M && hy<=700+M) return false;
+      // 左コの字上横 y=350 (x=240〜640)
+      if(hy>=350-M && hy<=350+M && hx>=240-M && hx<=640+M) return false;
+      // 左コの字下横 y=700: 水平支線と同一
+      // 右コの字縦 x=1760
+      if(hx>=1760-M && hx<=1760+M && hy>=700-M && hy<=1050+M) return false;
+      // 右コの字上横 y=700: 水平支線と同一
+      // 右コの字下横 y=1050 (x=1360〜1760)
+      if(hy>=1050-M && hy<=1050+M && hx>=1360-M && hx<=1760+M) return false;
+      // 画面端のマージン
+      if(hx<36 || hx>1964 || hy<36 || hy>1364) return false;
+      return true;
+    }
+
+    // 72px格子で全面に配置（2倍スケールなのでピッチも広げる）
+    for(let hx=72; hx<=1928; hx+=72){
+      for(let hy=72; hy<=1328; hy+=72){
+        if(!isSafe(hx,hy)) continue;
+        if(Math.random() < 0.45) continue; // 密度調整
+        const n=_mkH(hx,hy,_i++);
+        connectParkingToNearestEdge(n);
+      }
+    }
+
+    // ビル・マンション（2倍スケール位置）
+    [
+      [162,162,'building',0],[162,918,'building',2],
+      [972,162,'building',1],[1836,1188,'building',3],
+    ].forEach(([x,y,t,c])=>_mkB(x,y,t,c));
+
+    [
+      [918,162,'mansionH',0],[216,918,'mansionH',2],
+      [162,216,'mansionV',0],[1836,1188,'mansionV',1],
+    ].forEach(([x,y,t,c])=>{ const n=_mkB(x,y,t,c); connectParkingToNearestEdge(n); });
+  }
+};
+
+
 // エッジを「A → アクセスノード → B」に分割し、アクセスノードから駐車場へ branch エッジを追加
 function connectParkingToNearestEdge(pNode){
   const px = pNode.x, py = pNode.y;
@@ -3140,6 +3309,7 @@ function generateCity(){
   accidents.length=0; policeCars.length=0; score=0; budget=0; scoreBonus=1.0; bonusStreak=0; accidentCount=0;
   selectedCar=null; closeCarProfile();
   railways.length=0; // 鉄道データリセット
+  resetCam(); // カメラをリセット
 
   // ================================================================
   // ヘルパー
@@ -3197,35 +3367,8 @@ function generateCity(){
       }
     }
 
-    // 地形テクスチャを生成（以降のランダム生成と共通処理）
-    // → generateCity の残りを実行せず、地形のみ生成
-    {
-      const W = 1000, H = 700, TILE = 128;
-      terrainCanvas = document.createElement("canvas");
-      terrainCanvas.width = W; terrainCanvas.height = H;
-      const tCtx = terrainCanvas.getContext("2d");
-      const sx = Math.random()*500, sy = Math.random()*500;
-      function noiseV(x,y){
-        const x0=x+sx, y0=y+sy;
-        let v=0;
-        v+=Math.sin(x0*0.008+y0*0.005)*0.40;
-        v+=Math.sin(x0*0.022+y0*0.019+1.3)*0.25;
-        v+=Math.sin(x0*0.055+y0*0.048+2.7)*0.15;
-        v+=Math.sin((x0+y0)*0.015+0.8)*0.12;
-        v+=Math.sin(x0*0.11+y0*0.09+4.1)*0.08;
-        return (v+1)*0.5;
-      }
-      function tileIdx(t){ return t<0.30?2:t<0.55?1:0; }
-      const tilesReady = groundImgs.every(i=>i.complete&&i.naturalWidth>0);
-      if(tilesReady){
-        for(let cy2=0;cy2<H;cy2+=TILE) for(let cx2=0;cx2<W;cx2+=TILE){
-          const t=noiseV(cx2+TILE/2,cy2+TILE/2);
-          tCtx.drawImage(groundImgs[tileIdx(t)],cx2,cy2,TILE,TILE);
-        }
-      } else {
-        tCtx.fillStyle="#5a7a40"; tCtx.fillRect(0,0,W,H);
-      }
-    }
+    // 地形テクスチャを生成（共通関数）
+    terrainCanvas = buildTerrainCanvas(MAP_W, MAP_H);
     return;
   }
 
@@ -3329,9 +3472,9 @@ function generateCity(){
 
   // 外部ノードを幹線の端点として作成（パターンに応じて間引き）
   const hExtL=hYs.map(y=> shouldMakeExt(extPattern) ? mkNode(0,   y,"cross",true) : null);
-  const hExtR=hYs.map(y=> shouldMakeExt(extPattern) ? mkNode(1000,y,"cross",true) : null);
+  const hExtR=hYs.map(y=> shouldMakeExt(extPattern) ? mkNode(MAP_W,y,"cross",true) : null);
   const vExtT=vXs.map(x=> shouldMakeExt(extPattern) ? mkNode(x,  0,"cross",true) : null);
-  const vExtB=vXs.map(x=> shouldMakeExt(extPattern) ? mkNode(x,700,"cross",true) : null);
+  const vExtB=vXs.map(x=> shouldMakeExt(extPattern) ? mkNode(x,MAP_H,"cross",true) : null);
 
   // 交点ノードマトリクス: crossPt[hi][vi] = {x,y} の交差点ノード
   const crossPt=hYs.map((hy,hi)=>
@@ -4035,124 +4178,8 @@ function generateCity(){
 
   // ================================================================
   // 6. 地形テクスチャ生成（sin合成ノイズ + タイル画像）
-  // ================================================================
-  // sin合成ノイズでセルごとに地形タイプを決定し、
-  // ground_1(草地) / ground_2(砂地) / ground_3(土) の128×128pxタイルを貼る。
-  // 画像未ロード時は従来の色塗りにフォールバック。
-  // オフスクリーンCanvasに一括描画し、毎フレームは drawImage 1回のみ。
-  {
-    const W = 1000, H = 700;
-    const TILE = 128; // タイル1枚のサイズ
-    terrainCanvas = document.createElement("canvas");
-    terrainCanvas.width  = W;
-    terrainCanvas.height = H;
-    const tCtx = terrainCanvas.getContext("2d");
-
-    // ランダムシード値（リロードごとに異なる地形）
-    const sx = Math.random() * 500;
-    const sy = Math.random() * 500;
-
-    // sin合成ノイズ（5オクターブ）→ 0〜1
-    function noiseVal(x, y){
-      const x0 = x + sx, y0 = y + sy;
-      let v = 0;
-      v += Math.sin(x0 * 0.008 + y0 * 0.005) * 0.40;
-      v += Math.sin(x0 * 0.022 + y0 * 0.019 + 1.3) * 0.25;
-      v += Math.sin(x0 * 0.055 + y0 * 0.048 + 2.7) * 0.15;
-      v += Math.sin((x0 + y0) * 0.015 + 0.8) * 0.12;
-      v += Math.sin(x0 * 0.11  + y0 * 0.09  + 4.1) * 0.08;
-      return (v + 1) * 0.5; // 0〜1
-    }
-
-    // ノイズ値 → 地形タイプインデックス
-    // 0: 草地(ground_1)  1: 砂地(ground_2)  2: 土(ground_3)
-    // 自然な地形らしく: 草地が多め、砂地・土が点在
-    function tileIndex(t){
-      if(t < 0.30) return 2; // 土     (0〜0.30)
-      if(t < 0.55) return 1; // 砂地   (0.30〜0.55)
-      return 0;              // 草地   (0.55〜1.0)
-    }
-
-    // フォールバック用カラー（地形タイプ別）
-    const fallbackColors = [
-      [75, 120, 65],   // 草地: 緑
-      [145, 120, 75],  // 砂地: 黄褐色
-      [110, 85, 60],   // 土: 茶色
-    ];
-
-    // 画像が全て読み込まれているか確認
-    const tilesReady = groundImgs.every(img => img.complete && img.naturalWidth > 0);
-
-    if(tilesReady){
-      // ===== タイル画像モード =====
-      // セルごとにノイズ値を計算してタイルを選択し貼り付ける
-      // セル中心座標でノイズをサンプリング（タイル境界のムラを防ぐ）
-      for(let cy = 0; cy < H; cy += TILE){
-        for(let cx = 0; cx < W; cx += TILE){
-          // セル中心でノイズをサンプリング
-          const t = noiseVal(cx + TILE/2, cy + TILE/2);
-          const idx = tileIndex(t);
-          const img = groundImgs[idx];
-          // セルが画面端で128px未満になる場合も対応（clipで超過部分を切る）
-          tCtx.save();
-          tCtx.beginPath();
-          tCtx.rect(cx, cy, Math.min(TILE, W-cx), Math.min(TILE, H-cy));
-          tCtx.clip();
-          tCtx.drawImage(img, cx, cy, TILE, TILE);
-          tCtx.restore();
-        }
-      }
-
-      // タイル境界を自然に見せるため、境界付近にソフトブレンドを施す
-      // 隣接セルの地形タイプが異なる境界にのみ、細いグラデーション帯を描く
-      tCtx.globalAlpha = 0.35;
-      for(let cy = 0; cy < H; cy += TILE){
-        for(let cx = 0; cx < W; cx += TILE){
-          const t  = noiseVal(cx + TILE/2, cy + TILE/2);
-          const tR = noiseVal(cx + TILE*1.5, cy + TILE/2);
-          const tB = noiseVal(cx + TILE/2, cy + TILE*1.5);
-          const idxC = tileIndex(t);
-          // 右隣と異なるタイプなら右端にブレンド帯
-          if(cx + TILE < W && tileIndex(tR) !== idxC){
-            const g = tCtx.createLinearGradient(cx+TILE-16, 0, cx+TILE+16, 0);
-            const [r1,g1,b1] = fallbackColors[idxC];
-            const [r2,g2,b2] = fallbackColors[tileIndex(tR)];
-            g.addColorStop(0, `rgba(${r1},${g1},${b1},0)`);
-            g.addColorStop(0.5, `rgba(${Math.round((r1+r2)/2)},${Math.round((g1+g2)/2)},${Math.round((b1+b2)/2)},0.6)`);
-            g.addColorStop(1, `rgba(${r2},${g2},${b2},0)`);
-            tCtx.fillStyle = g;
-            tCtx.fillRect(cx+TILE-16, cy, 32, TILE);
-          }
-          // 下隣と異なるタイプなら下端にブレンド帯
-          if(cy + TILE < H && tileIndex(tB) !== idxC){
-            const g = tCtx.createLinearGradient(0, cy+TILE-16, 0, cy+TILE+16);
-            const [r1,g1,b1] = fallbackColors[idxC];
-            const [r2,g2,b2] = fallbackColors[tileIndex(tB)];
-            g.addColorStop(0, `rgba(${r1},${g1},${b1},0)`);
-            g.addColorStop(0.5, `rgba(${Math.round((r1+r2)/2)},${Math.round((g1+g2)/2)},${Math.round((b1+b2)/2)},0.6)`);
-            g.addColorStop(1, `rgba(${r2},${g2},${b2},0)`);
-            tCtx.fillStyle = g;
-            tCtx.fillRect(cx, cy+TILE-16, TILE, 32);
-          }
-        }
-      }
-      tCtx.globalAlpha = 1.0;
-
-    } else {
-      // ===== フォールバック: 従来の色塗りモード =====
-      const imageData = tCtx.createImageData(W, H);
-      const data = imageData.data;
-      for(let y = 0; y < H; y++){
-        for(let x = 0; x < W; x++){
-          const t = noiseVal(x, y);
-          const [r, g, b] = fallbackColors[tileIndex(t)];
-          const i = (y * W + x) * 4;
-          data[i]=r; data[i+1]=g; data[i+2]=b; data[i+3]=255;
-        }
-      }
-      tCtx.putImageData(imageData, 0, 0);
-    }
-  }
+  // 地形テクスチャを生成（共通関数）
+  terrainCanvas = buildTerrainCanvas(MAP_W, MAP_H);
 
   // ================================================================
   // isRealCross 最終計算（全connectParkingToNearestEdge完了後）
@@ -4503,16 +4530,61 @@ function clearAccident(){
 // ===== Canvas クリックハンドラ =====
 let _dbgMx = 0, _dbgMy = 0;
 canvas.addEventListener("mousemove", ev=>{
-  const r = canvas.getBoundingClientRect();
-  _dbgMx = Math.round((ev.clientX - r.left) * canvas.width  / r.width);
-  _dbgMy = Math.round((ev.clientY - r.top)  * canvas.height / r.height);
+  const w = clientToWorld(ev.clientX, ev.clientY);
+  _dbgMx = Math.round(w.x);
+  _dbgMy = Math.round(w.y);
+  // パン中の処理
+  if(_isPanning){
+    const r = canvas.getBoundingClientRect();
+    const cx = (ev.clientX - r.left) * (canvas.width / r.width);
+    const cy = (ev.clientY - r.top)  * (canvas.height / r.height);
+    camX = _panStartCamX + (cx - _panStartX);
+    camY = _panStartCamY + (cy - _panStartY);
+    clampCam();
+  }
 });
 
+// ホイールでズーム（マウス位置中心）
+canvas.addEventListener("wheel", ev=>{
+  ev.preventDefault();
+  const factor = ev.deltaY < 0 ? 1.1 : 1/1.1;
+  const r = canvas.getBoundingClientRect();
+  const cx = (ev.clientX - r.left) * (canvas.width / r.width);
+  const cy = (ev.clientY - r.top)  * (canvas.height / r.height);
+  // マウス位置を固定したままズーム
+  const wx = (cx - camX) / camZoom;
+  const wy = (cy - camY) / camZoom;
+  setCamZoom(camZoom * factor);
+  camX = cx - wx * camZoom;
+  camY = cy - wy * camZoom;
+  clampCam();
+}, { passive: false });
+
+// 中ボタン or 右クリックでパン開始
+canvas.addEventListener("mousedown", ev=>{
+  if(ev.button === 1 || ev.button === 2){
+    ev.preventDefault();
+    _isPanning = true;
+    const r = canvas.getBoundingClientRect();
+    _panStartX = (ev.clientX - r.left) * (canvas.width / r.width);
+    _panStartY = (ev.clientY - r.top)  * (canvas.height / r.height);
+    _panStartCamX = camX;
+    _panStartCamY = camY;
+    canvas.style.cursor = 'grabbing';
+  }
+});
+canvas.addEventListener("mouseup", ev=>{
+  if(ev.button === 1 || ev.button === 2){
+    _isPanning = false;
+    canvas.style.cursor = '';
+  }
+});
+canvas.addEventListener("mouseleave", ()=>{ _isPanning = false; canvas.style.cursor=''; });
+canvas.addEventListener("contextmenu", ev=>{ if(_isPanning || camZoom!==1.0) ev.preventDefault(); });
+
 canvas.addEventListener("click", ev=>{
-  const r=canvas.getBoundingClientRect();
-  const scaleX = canvas.width  / r.width;
-  const scaleY = canvas.height / r.height;
-  const mx=(ev.clientX-r.left)*scaleX, my=(ev.clientY-r.top)*scaleY;
+  if(_isPanning) return; // パン終了直後のクリックは無視
+  const {x: mx, y: my} = clientToWorld(ev.clientX, ev.clientY);
 
   // --- 信号設置/撤去モード: 交差点クリック ---
   if(operationMode==='install' || operationMode==='remove'){
@@ -4953,11 +5025,10 @@ function showSignEditPopup(targetEdge, autoDirs, laneIndex=null){
   const placeDist = dist - trimTo - 30;
   const canvasX = targetEdge.from.x + ux * Math.max(placeDist, dist*0.5);
   const canvasY = targetEdge.from.y + uy * Math.max(placeDist, dist*0.5);
-  // canvas上の座標をページ座標に変換
-  const scaleX = r.width  / canvas.width;
-  const scaleY = r.height / canvas.height;
-  let px = r.left + canvasX * scaleX;
-  let py = r.top  + canvasY * scaleY + 10;
+  // ワールド座標をページ座標に変換（ズーム・パン対応）
+  const sc = worldToClient(canvasX, canvasY);
+  let px = sc.x;
+  let py = sc.y + 10;
   // 画面外にはみ出さないよう調整
   if(px + 170 > window.innerWidth)  px = window.innerWidth - 175;
   if(py + 240 > window.innerHeight) py = py - 250;
@@ -5308,9 +5379,61 @@ function reverseOneway(edge){
 }
 
 
+// マップIDごとのcanvasサイズ定義
+const MAP_SIZES = {
+  'large_cross_d': { w: 2000, h: 1400 },
+  // 将来の大型マップはここに追加
+};
+const MAP_SIZE_DEFAULT = { w: 1000, h: 700 };
+
 function selectMap(mapId){
   currentMapId = mapId || null;
+  // MAP_W/MAP_Hをマップサイズに合わせて変更（canvas自体のサイズは固定）
+  const sz = MAP_SIZES[currentMapId] || MAP_SIZE_DEFAULT;
+  MAP_W = sz.w;
+  MAP_H = sz.h;
   generateCity();
+}
+
+// ===== カメラ制御 =====
+const CAM_ZOOM_MIN = 0.25;
+const CAM_ZOOM_MAX = 4.0;
+
+function setCamZoom(z){
+  camZoom = Math.max(CAM_ZOOM_MIN, Math.min(CAM_ZOOM_MAX, z));
+  clampCam();
+  document.getElementById('zoomLabel').textContent = '×' + camZoom.toFixed(2);
+}
+
+function clampCam(){
+  const scaledW = MAP_W * camZoom;
+  const scaledH = MAP_H * camZoom;
+  if(scaledW <= canvas.width){
+    // マップがcanvasより小さい（縮小表示）→ 中央固定
+    camX = (canvas.width  - scaledW) / 2;
+  } else {
+    // マップがcanvasより大きい（拡大表示）→ パン範囲を制限
+    camX = Math.max(canvas.width - scaledW, Math.min(0, camX));
+  }
+  if(scaledH <= canvas.height){
+    camY = (canvas.height - scaledH) / 2;
+  } else {
+    camY = Math.max(canvas.height - scaledH, Math.min(0, camY));
+  }
+}
+
+function resetCam(){
+  // マップ全体がcanvasに収まる初期ズームを計算
+  const fitZoom = Math.min(
+    canvas.width  / MAP_W,
+    canvas.height / MAP_H
+  );
+  camZoom = Math.min(1.0, fitZoom); // 通常サイズは等倍、大型は縮小
+  // マップを中央に配置
+  camX = (canvas.width  - MAP_W * camZoom) / 2;
+  camY = (canvas.height - MAP_H * camZoom) / 2;
+  clampCam();
+  document.getElementById('zoomLabel').textContent = '×' + camZoom.toFixed(2);
 }
 
 function togglePause(){
@@ -7190,7 +7313,7 @@ function drawRivers(){
   for(const r of rivers){
     if(r.type==="h"){
       // ---- 水平川 ----
-      const w = 1000, h = r.y2 - r.y1;
+      const w = MAP_W, h = r.y2 - r.y1;
       if(riverImg.complete && riverImg.naturalWidth > 0){
         // 画像を横にタイル（そのまま描画、回転なし）
         const tw = 128;
@@ -7212,7 +7335,7 @@ function drawRivers(){
       const hStep = Math.max(10, h / 4);
       for(let y = r.y1 + hStep * 0.5; y < r.y2; y += hStep){
         ctx.beginPath();
-        for(let x = 0; x <= 1000; x += 8){
+        for(let x = 0; x <= MAP_W; x += 8){
           const wave = Math.sin((x * 0.05) + timeCounter * 0.04) * 2.5;
           x === 0 ? ctx.moveTo(x, y + wave) : ctx.lineTo(x, y + wave);
         }
@@ -7222,7 +7345,7 @@ function drawRivers(){
     } else {
       // ---- 縦川 ----
       // 回転は使わず、縦方向にタイルを積み上げるだけ
-      const cw = r.x2 - r.x1, ch = 700;
+      const cw = r.x2 - r.x1, ch = MAP_H;
       if(riverImg.complete && riverImg.naturalWidth > 0){
         // 縦にタイルを並べる（画像の高さ128pxを川幅に拡縮して積む）
         const th = 128;
@@ -7244,7 +7367,7 @@ function drawRivers(){
       const vStep = Math.max(10, cw / 4);
       for(let x = r.x1 + vStep * 0.5; x < r.x2; x += vStep){
         ctx.beginPath();
-        for(let y = 0; y <= 700; y += 8){
+        for(let y = 0; y <= MAP_H; y += 8){
           const wave = Math.sin((y * 0.05) + timeCounter * 0.04) * 2.5;
           y === 0 ? ctx.moveTo(x + wave, y) : ctx.lineTo(x + wave, y);
         }
@@ -7402,6 +7525,69 @@ function drawExitNumbers(){
   }
 }
 
+// ===== 地形テクスチャ生成（共通関数）=====
+// 16pxタイルでsin合成ノイズを使って地形を生成する。
+// ground_1〜3 の128px画像を16×16に縮小して貼り付ける。
+// MAP_W/MAP_H対応のためW/Hを引数で受け取る。
+function buildTerrainCanvas(W, H){
+  const TILE = 16; // タイルサイズ（16px）
+  const tc = document.createElement("canvas");
+  tc.width = W; tc.height = H;
+  const tCtx = tc.getContext("2d");
+
+  // ランダムシード
+  const sx = Math.random() * 500;
+  const sy = Math.random() * 500;
+
+  // sin合成ノイズ（5オクターブ）→ 0〜1
+  function noiseVal(x, y){
+    const x0 = x + sx, y0 = y + sy;
+    let v = 0;
+    v += Math.sin(x0 * 0.008 + y0 * 0.005) * 0.40;
+    v += Math.sin(x0 * 0.022 + y0 * 0.019 + 1.3) * 0.25;
+    v += Math.sin(x0 * 0.055 + y0 * 0.048 + 2.7) * 0.15;
+    v += Math.sin((x0 + y0) * 0.015 + 0.8) * 0.12;
+    v += Math.sin(x0 * 0.11  + y0 * 0.09  + 4.1) * 0.08;
+    return (v + 1) * 0.5;
+  }
+
+  // ノイズ値 → 地形インデックス（0:草地 1:砂地 2:土）
+  function tileIndex(t){
+    if(t < 0.30) return 2;
+    if(t < 0.55) return 1;
+    return 0;
+  }
+
+  const tilesReady = groundImgs.every(img => img.complete && img.naturalWidth > 0);
+
+  if(tilesReady){
+    // 画像を16×16に縮小して敷き詰める
+    // imageSmoothingをoffにしてドット絵テイストを保持
+    tCtx.imageSmoothingEnabled = false;
+    for(let cy = 0; cy < H; cy += TILE){
+      for(let cx = 0; cx < W; cx += TILE){
+        const t = noiseVal(cx + TILE/2, cy + TILE/2);
+        const img = groundImgs[tileIndex(t)];
+        const tw = Math.min(TILE, W - cx);
+        const th = Math.min(TILE, H - cy);
+        tCtx.drawImage(img, 0, 0, 128, 128, cx, cy, tw, th);
+      }
+    }
+  } else {
+    // フォールバック：色塗り
+    const fallback = [[75,120,65],[145,120,75],[110,85,60]];
+    for(let cy = 0; cy < H; cy += TILE){
+      for(let cx = 0; cx < W; cx += TILE){
+        const t = noiseVal(cx + TILE/2, cy + TILE/2);
+        const [r,g,b] = fallback[tileIndex(t)];
+        tCtx.fillStyle = `rgb(${r},${g},${b})`;
+        tCtx.fillRect(cx, cy, Math.min(TILE,W-cx), Math.min(TILE,H-cy));
+      }
+    }
+  }
+  return tc;
+}
+
 function drawTerrain(){
   if(terrainCanvas){
     ctx.drawImage(terrainCanvas, 0, 0);
@@ -7433,25 +7619,25 @@ function drawDebugGrid(){
   // 18px細線（MID・MAJORの位置はスキップ）
   ctx.strokeStyle = 'rgba(0,255,80,0.55)';
   ctx.lineWidth = 0.5;
-  for(let x=0; x<=1000; x+=MINOR){
+  for(let x=0; x<=MAP_W; x+=MINOR){
     if(x % MID === 0) continue;
-    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,700); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,MAP_H); ctx.stroke();
   }
-  for(let y=0; y<=700; y+=MINOR){
+  for(let y=0; y<=MAP_H; y+=MINOR){
     if(y % MID === 0) continue;
-    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(1000,y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(MAP_W,y); ctx.stroke();
   }
 
   // 90px中線（MAJORの位置はスキップ）
   ctx.strokeStyle = 'rgba(0,255,80,0.75)';
   ctx.lineWidth = 0.9;
-  for(let x=0; x<=1000; x+=MID){
+  for(let x=0; x<=MAP_W; x+=MID){
     if(x % MAJOR === 0) continue;
-    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,700); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,MAP_H); ctx.stroke();
   }
-  for(let y=0; y<=700; y+=MID){
+  for(let y=0; y<=MAP_H; y+=MID){
     if(y % MAJOR === 0) continue;
-    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(1000,y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(MAP_W,y); ctx.stroke();
   }
 
   // 180px太線 + ラベル
@@ -7461,12 +7647,12 @@ function drawDebugGrid(){
   ctx.font = 'bold 10px monospace';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
-  for(let x=0; x<=1000; x+=MAJOR){
-    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,700); ctx.stroke();
+  for(let x=0; x<=MAP_W; x+=MAJOR){
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,MAP_H); ctx.stroke();
     ctx.fillText(`${x}`, x+2, 2);
   }
-  for(let y=0; y<=700; y+=MAJOR){
-    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(1000,y); ctx.stroke();
+  for(let y=0; y<=MAP_H; y+=MAJOR){
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(MAP_W,y); ctx.stroke();
     ctx.fillText(`${y}`, 2, y+2);
   }
 
@@ -8204,7 +8390,12 @@ function loop(){
     // 鉄道システム更新
     if(railways.length > 0) updateRailways();
   }
-  ctx.clearRect(0,0,1000,700);
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // カメラ変換を適用（ズーム・パン）
+  ctx.save();
+  ctx.setTransform(camZoom, 0, 0, camZoom, camX, camY);
+
   drawTerrain();
   drawRivers();
   // 線路タイル・駅は道路より下に描画
@@ -8225,19 +8416,17 @@ function loop(){
   drawExitNumbers();
   drawDebugGrid();
 
-  // ===== 夜間演出 =====
+  // ===== 夜間演出（カメラ変換内：ワールド座標系で描画）=====
   if(nightAlpha > 0.01){
-    ctx.save();
-
-    // 案①: 暗色オーバーレイ（青みがかった暗さ）
+    // 案①: 暗色オーバーレイ（ワールド全体を覆う大きな矩形）
     ctx.fillStyle = `rgba(5, 8, 25, ${nightAlpha})`;
-    ctx.fillRect(0, 0, 1000, 700);
+    ctx.fillRect(-camX/camZoom, -camY/camZoom, canvas.width/camZoom, canvas.height/camZoom);
 
     // 案②: 信号機のある交差点周辺に光のハロー
     if(nightAlpha > 0.1){
       for(const n of nodes){
         if(!n.hasSignal || !n.isRealCross || n.external) continue;
-        const r = 55 + 15 * nightAlpha; // 夜が深いほど光が際立つ
+        const r = 55 + 15 * nightAlpha;
         const alpha = nightAlpha * 0.35;
         const grd = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r);
         grd.addColorStop(0, `rgba(255, 200, 100, ${alpha})`);
@@ -8248,8 +8437,6 @@ function loop(){
         ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
         ctx.fill();
       }
-
-      // ガソリンスタンドも明るく（24時間営業）
       for(const n of nodes){
         if(n.houseType !== 'gasStation') continue;
         const r = 50;
@@ -8263,18 +8450,21 @@ function loop(){
         ctx.fill();
       }
     }
-
-    ctx.restore();
   }
+
+  // カメラ変換を元に戻す
+  ctx.restore();
+
+  // ===== 画面固定UIの描画（カメラ変換外）=====
   // 一時停止インジケーター
   if(gamePaused){
     ctx.save();
     ctx.fillStyle='rgba(0,0,0,0.35)';
-    ctx.fillRect(0,0,1000,700);
+    ctx.fillRect(0,0,canvas.width,canvas.height);
     ctx.fillStyle='rgba(255,255,255,0.9)';
     ctx.font='bold 48px sans-serif';
     ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillText('⏸ PAUSED',500,350);
+    ctx.fillText('⏸ PAUSED', canvas.width/2, canvas.height/2);
     ctx.restore();
   }
   document.getElementById("jam").textContent=jam;
